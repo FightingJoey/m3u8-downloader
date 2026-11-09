@@ -8,7 +8,7 @@
   <meta name="author" content="毛静文,Momo">
   <meta name="keywords" content="m3u8 下载工具, 毛静文的博客,Momo's Blog">
   <meta name="description" content="m3u8 下载工具,无需下载软件,打开网站即可下载,自动检测,一键下载">
-  <title>m3u8 downloader</title>
+  <title>m3u8 downloader (Pornhub)</title>
   <style>
     /*全局设置*/
     html,
@@ -439,9 +439,9 @@
     </a>
 
     <!--文件载入-->
-    <div class="m-p-temp-url">测试链接：https://upyun.luckly-mjw.cn/Assets/media-source/example/media/index.m3u8</div>
+    <div class="m-p-temp-url">双模式：URL 含 m3u8 → 直接解析下载；不含 m3u8 → 按 Pornhub 视频页抓取 1080P m3u8（合成 MP4 用原标题命名）</div>
     <section class="m-p-input-container">
-      <input type="text" v-model="url" :disabled="downloading" placeholder="请输入 m3u8 链接">
+      <input type="text" v-model="url" :disabled="downloading" placeholder="m3u8 链接，或 Pornhub 视频页（不含 m3u8 的 view_video / viewkey）">
 
       <!--范围查询-->
       <template v-if="!downloading || rangeDownload.isShowRange">
@@ -504,11 +504,11 @@
     s.parentNode.insertBefore(hm, s);
   })();
 </script>
-<!--vue 前端框架-->
-<script src="https://upyun.luckly-mjw.cn/lib/vue.js"></script>
-<script src="https://upyun.luckly-mjw.cn/lib/aes-decryptor.js"></script>
-<script src="https://upyun.luckly-mjw.cn/lib/mux-mp4.js"></script>
-<script src="https://upyun.luckly-mjw.cn/lib/stream-saver.js"></script>
+<!--vue 前端框架（本地，配合 ph_server.py）-->
+<script src="./vue.js"></script>
+<script src="./aes-decryptor.js"></script>
+<script src="./mux-mp4.js"></script>
+<script src="./StreamSaver.js"></script>
 
 <script>
 
@@ -536,6 +536,7 @@
         mediaFileList: [], // 下载的媒体数组
         isSupperStreamWrite: window.streamSaver && !window.streamSaver.useBlobFallback, // 当前浏览器是否支持流式下载
         streamWriter: null, // 文件流写入器
+        pendingStreamIsMp4: null, // 特大视频流式下载：等 title 就绪后再建写入流
         streamDownloadIndex: 0, // 文件流写入器，正准备写入第几个视频片段
         rangeDownload: { // 特定范围下载
           isShowRange: false, // 是否显示范围下载
@@ -587,6 +588,32 @@
         return title
       },
 
+      // 文件名安全化（去掉路径分隔符等）
+      sanitizeFileName(name) {
+        return String(name || '')
+          .replace(/[\\/:*?"<>|]/g, '_')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 180)
+      },
+
+      // this.title（API / ?title=）优先；为空才回退 document.title / 时间戳
+      // 注意：本页 document.title 是 "m3u8 downloader (Pornhub)"，不能再覆盖 this.title
+      resolveDownloadFileName() {
+        if (this.title) {
+          return this.sanitizeFileName(this.title)
+        }
+        const docTitle = this.getDocumentTitle()
+        if (
+          docTitle &&
+          docTitle !== 'm3u8 downloader' &&
+          docTitle !== 'm3u8 downloader (Pornhub)'
+        ) {
+          return this.sanitizeFileName(docTitle)
+        }
+        return this.formatTime(this.beginTime || new Date(), 'YYYY_MM_DD hh_mm_ss')
+      },
+
       // 退出弹窗
       onKeyup(event) {
         if (event.keyCode === 13) { // 键入ESC
@@ -617,35 +644,90 @@
         xhr.send(null);
       },
 
-      // 合成URL
+      // 合成URL（兼容相对 playlist：/cache/xxx.m3u8 + /proxy?...）
       applyURL(targetURL, baseURL) {
         baseURL = baseURL || location.href
+        if (!targetURL) return targetURL
         if (targetURL.indexOf('http') === 0) {
           // 当前页面使用 https 协议时，强制使 ts 资源也使用 https 协议获取
           if (location.href.indexOf('https') === 0) {
             return targetURL.replace('http://', 'https://')
           }
           return targetURL
-        } else if (targetURL[0] === '/') {
-          let domain = baseURL.split('/')
-          return domain[0] + '//' + domain[2] + targetURL
-        } else {
-          let domain = baseURL.split('/')
+        }
+        try {
+          // 用 URL API：相对 base（如 /cache/a.m3u8）也能正确解析 /proxy?... 与相对分片
+          return new URL(targetURL, new URL(baseURL, location.href)).href
+        } catch (e) {
+          if (targetURL[0] === '/') {
+            return location.origin + targetURL
+          }
+          let domain = String(baseURL).split('/')
           domain.pop()
           return domain.join('/') + '/' + targetURL
         }
       },
 
-      // 使用流式下载，边下载边保存，解决大视频文件内存不足的难题 
+      openStreamWriter(isMp4) {
+        const fileName = this.resolveDownloadFileName()
+        this.streamWriter = window.streamSaver.createWriteStream(`${fileName}.${isMp4 ? 'mp4' : 'ts'}`).getWriter()
+      },
+
+      // 使用流式下载，边下载边保存，解决大视频文件内存不足的难题
+      // 视频页需等 /api/resolve 返回 title 后再开写入流，避免文件名被页面 title 盖掉
       streamDownload(isMp4) {
         this.isGetMP4 = isMp4
-        this.title = new URL(this.url).searchParams.get('title') || this.title // 获取视频标题
-        let fileName = this.title || this.formatTime(new Date(), 'YYYY_MM_DD hh_mm_ss')
-        if (document.title !== 'm3u8 downloader') {
-          fileName = this.getDocumentTitle()
+        this.pendingStreamIsMp4 = !!isMp4
+        try {
+          const qTitle = new URL(this.url, location.href).searchParams.get('title')
+          if (qTitle) this.title = this.sanitizeFileName(qTitle)
+        } catch (e) { /* ignore */ }
+        // 已是 m3u8 或已有 title：可立刻建流；否则留给 resolve / 正式下载前
+        if (String(this.url).toLowerCase().indexOf('m3u8') !== -1 || this.title) {
+          this.openStreamWriter(isMp4)
+          this.pendingStreamIsMp4 = null
         }
-        this.streamWriter = window.streamSaver.createWriteStream(`${fileName}.${isMp4 ? 'mp4' : 'ts'}`).getWriter()
         this.getM3U8()
+      },
+
+      // 是否 Pornhub 视频页（用于「URL 不含 m3u8」分支的校验）
+      isPornhubPage(u) {
+        if (!u) return false
+        const s = String(u).toLowerCase()
+        if (s.indexOf('pornhub.') === -1) return false
+        return s.indexOf('view_video.php') > -1 || s.indexOf('viewkey=') > -1 || s.indexOf('/embed/') > -1
+      },
+
+      // 调用本地 ph_server：download_ph_1080 取 1080P index-v1-a1.m3u8，再走原有解析下载
+      resolvePornhubThen(onlyGetRange) {
+        const pageUrl = this.url
+        this.tips = '正在从 Pornhub 解析 1080P m3u8（download_ph_1080）…'
+        fetch('/api/resolve?url=' + encodeURIComponent(pageUrl))
+          .then((r) => r.json().then((data) => ({ status: r.status, data })))
+          .then(({ data }) => {
+            if (!data || !data.ok) {
+              this.tips = 'm3u8 视频在线提取工具'
+              alert((data && data.error) || 'Pornhub 解析失败')
+              return
+            }
+            console.log('[ph] resolved', data)
+            // 原视频标题优先；缺省才用 viewkey
+            const rawTitle = (data.title && String(data.title).trim()) || data.viewkey || this.title || ''
+            this.title = this.sanitizeFileName(rawTitle)
+            if (this.pendingStreamIsMp4 !== null && this.pendingStreamIsMp4 !== undefined && !this.streamWriter) {
+              this.openStreamWriter(this.pendingStreamIsMp4)
+              this.pendingStreamIsMp4 = null
+            }
+            this.tips = '已取到 1080P 播放列表（分片 ' + (data.segment_count || '?') + '）' +
+              (this.title ? ('，文件名: ' + this.title) : '') + '，开始下载…'
+            // 必须用绝对 URL，否则旧 applyURL 会把 /proxy 拼成错误主机导致全部分片失败
+            this.url = new URL(data.playlist_url, location.href).href
+            this.getM3U8(onlyGetRange)
+          })
+          .catch((err) => {
+            this.tips = 'm3u8 视频在线提取工具'
+            alert('无法连接本地 ph_server.py：' + err + '\n请先运行: python3 ph_server.py')
+          })
       },
 
       // 解析为 mp4 下载
@@ -660,8 +742,20 @@
           alert('请输入链接')
           return
         }
-        if (this.url.toLowerCase().indexOf('m3u8') === -1) {
-          alert('链接有误，请重新输入')
+        // 分流规则：URL 字符串是否含 "m3u8"（忽略大小写）
+        // - 含 m3u8 → 直接当播放列表解析下载，绝不调用 /api/resolve
+        // - 不含 m3u8 → 当视频页：校验 Pornhub view_video/viewkey/embed 后调 /api/resolve
+        const urlLower = String(this.url).toLowerCase()
+        if (urlLower.indexOf('m3u8') === -1) {
+          if (!this.isPornhubPage(this.url)) {
+            alert('请输入 m3u8 链接，或 Pornhub 视频页链接（view_video.php?viewkey=…）')
+            return
+          }
+          if (this.downloading) {
+            alert('资源下载中，请稍后')
+            return
+          }
+          this.resolvePornhubThen(onlyGetRange)
           return
         }
         if (this.downloading) {
@@ -688,7 +782,14 @@
           window.history.replaceState(null, '', `${location.href.split('?')[0]}?source=${this.url}`)
         }
 
-        this.title = new URL(this.url).searchParams.get('title') || this.title // 获取视频标题
+        {
+          const qTitle = new URL(this.url, location.href).searchParams.get('title')
+          if (qTitle) this.title = this.sanitizeFileName(qTitle)
+        }
+        if (this.pendingStreamIsMp4 !== null && this.pendingStreamIsMp4 !== undefined && !this.streamWriter) {
+          this.openStreamWriter(this.pendingStreamIsMp4)
+          this.pendingStreamIsMp4 = null
+        }
         this.tips = 'm3u8 文件下载中，请稍后'
         this.beginTime = new Date()
         this.ajax({
@@ -697,19 +798,30 @@
             this.tsUrlList = []
             this.finishList = []
 
-            // 提取 ts 视频片段地址
+            // 提取 ts 视频片段地址；fMP4 时把 EXT-X-MAP init 插到最前
+            let mapUri = ''
             m3u8Str.split('\n').forEach((item) => {
+              const trimmed = (item || '').trim()
+              if (/^#EXT-X-MAP:/i.test(trimmed)) {
+                mapUri = (trimmed.match(/URI="([^"]+)"/i) || ['', ''])[1]
+              }
               // if (/.(png|image|ts|jpg|mp4|jpeg)/.test(item)) {
               // 放开片段后缀限制，下载非 # 开头的链接片段
-              if (/^[^#]/.test(item)) {
-                console.log(item)
-                this.tsUrlList.push(this.applyURL(item, this.url))
+              if (/^[^#]/.test(trimmed)) {
+                console.log(trimmed)
+                this.tsUrlList.push(this.applyURL(trimmed, this.url))
                 this.finishList.push({
-                  title: item,
+                  title: trimmed,
                   status: ''
                 })
               }
             })
+            if (mapUri) {
+              const absMap = this.applyURL(mapUri, this.url)
+              console.log('[ph] EXT-X-MAP init', absMap)
+              this.tsUrlList.unshift(absMap)
+              this.finishList.unshift({ title: mapUri, status: '' })
+            }
 
             // 仅获取视频片段数
             if (onlyGetRange) {
@@ -852,10 +964,7 @@
               this.streamWriter.close()
             }
           } else if (this.finishNum === this.rangeDownload.targetSegment) {
-            let fileName = this.title || this.formatTime(this.beginTime, 'YYYY_MM_DD hh_mm_ss')
-            if (document.title !== 'm3u8 downloader') {
-              fileName = this.getDocumentTitle()
-            }
+            const fileName = this.resolveDownloadFileName()
             this.downloadFile(this.mediaFileList, fileName)
           }
           callback && callback()
@@ -972,10 +1081,7 @@
       // 强制下载现有片段
       forceDownload() {
         if (this.mediaFileList.length) {
-          let fileName = this.title || this.formatTime(this.beginTime, 'YYYY_MM_DD hh_mm_ss')
-          if (document.title !== 'm3u8 downloader') {
-            fileName = this.getDocumentTitle()
-          }
+          const fileName = this.resolveDownloadFileName()
           this.downloadFile(this.mediaFileList, fileName)
         } else {
           alert('当前无已下载片段')
