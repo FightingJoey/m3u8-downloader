@@ -1,3 +1,5 @@
+> **本 fork（Pornhub 取链 / Docker 代理说明）见 [README-PH.md](./README-PH.md)。** 下文为上游原版说明，请勿在此重复 Docker 长文。
+
 # 欢迎加入社区交流群
 *群已满员，请添加 mjw707577045 加群*
 

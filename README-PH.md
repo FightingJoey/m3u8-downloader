@@ -96,22 +96,34 @@ docker run --rm -p 8765:8765 m3u8-downloader-ph
 若日志出现 `SSL: UNEXPECTED_EOF_WHILE_READING` / 直连 `cn.pornhub.com` 失败，多半是容器在国内被墙直连，而不是代码坏了。
 
 `docker-compose.yml` **只**透传大写的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`。  
-**不要** `export http_proxy=`（空值）：CPython 会优先看小写，空的 `http_proxy` 会把已设的大写代理从 `getproxies()` 里删掉，导致 HTTPS 直连超时。Compose 也不再注入空的小写变量。自定义 `docker run` 时同样只设你真正需要的变量。
+**不要**留下空的小写 `http_proxy=` / `https_proxy=`：CPython 的 `urllib.request.getproxies()` 会优先看小写，空字符串会把已设的大写代理清掉，请求变成直连并握手超时。Compose 已不再注入空的小写变量；自定义 `docker run` 时同样只设你真正需要的变量。
 
-#### OrbStack / Docker Desktop（推荐）
+### 构建 vs 运行：代理主机名不一样（OrbStack 必读）
 
-代理跑在**宿主机**时，容器里要用 `host.docker.internal`，**不要**写 `127.0.0.1`（那是容器自己，不是宿主机）。
+| 阶段 | 谁在连代理 | 该用的代理地址 | 原因 |
+|------|------------|----------------|------|
+| **build**（拉 `python:3.12-slim` 等） | **宿主机**上的 Docker / BuildKit | `http://127.0.0.1:7890`，或干脆 unset 代理 | 宿主机经常**解析不了** `host.docker.internal`，会报 `lookup host.docker.internal: no such host` / `proxyconnect tcp: dial tcp: lookup …` |
+| **run**（容器内 `ph_server` 取 Pornhub） | **容器**里的进程 | `http://host.docker.internal:7890` | 容器里的 `127.0.0.1` 是容器自己，不是 Mac/Windows 上的 Clash |
 
-假设 Clash / V2Ray / Surge 等 HTTP 端口为 `7890`：
+一句话：**build 用本机回环；run 用 `host.docker.internal`。不要混用。**
+
+推荐两步（假设 Clash HTTP 混合端口为 `7890`，按本机实际改）：
 
 ```bash
-export HTTPS_PROXY=http://host.docker.internal:7890
-export HTTP_PROXY=http://host.docker.internal:7890
-export ALL_PROXY=http://host.docker.internal:7890
-# 若客户端只开 SOCKS，可改用：
-# export ALL_PROXY=socks5h://host.docker.internal:7890
+# ① 构建：宿主机走 127.0.0.1（或见下方「镜像已缓存」跳过代理）
+export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=http://127.0.0.1:7890
 export NO_PROXY=localhost,127.0.0.1,host.docker.internal
-docker compose up -d --build
+docker compose build
+
+# ② 运行：容器走 host.docker.internal，才能连上宿主机 Clash
+export HTTP_PROXY=http://host.docker.internal:7890 HTTPS_PROXY=http://host.docker.internal:7890 ALL_PROXY=http://host.docker.internal:7890
+docker compose up -d
+```
+
+本地已有 `python:3.12-slim`、构建不必再拉镜像时，可临时去掉代理再 build：
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY docker compose build
 ```
 
 启动日志应出现一行类似：
@@ -120,9 +132,16 @@ docker compose up -d --build
 [ok] 代理环境: HTTPS_PROXY=http://host.docker.internal:7890, HTTP_PROXY=http://host.docker.internal:7890, ...
 ```
 
-若显示「未设置」，说明 compose 启动时 shell 里没有这些变量。
+若仍是 `127.0.0.1:7890`，容器里的取链会连到自己而不是宿主机代理。若显示「未设置」，说明 compose 启动时 shell 里没有这些变量。
 
-#### 不用 Compose 的 docker run 示例
+### Clash / 代理客户端注意
+
+- 勾选 **Allow LAN / 允许局域网连接**，监听不要只绑 `127.0.0.1`（需接受来自 Docker / `host.docker.internal` 的入站）。
+- 确认 HTTP **混合端口**就是你填的端口（常见 `7890`）。
+- 本服务用 Python 标准库 `urllib`，代理请用 **`http://…`**。不要只塞 `socks5://`：标准库不认 SOCKS（除非另装依赖）。`ALL_PROXY` 也应写 `http://host.docker.internal:7890`。
+- 规则里让 Google / Pornhub 走代理节点，不要误 DIRECT；OrbStack + Clash **TUN** 有时会导致 CONNECT 成功但 HTTPS 握手卡住，可先关 TUN 再测。
+
+### 不用 Compose 的 docker run 示例
 
 ```bash
 docker run --rm -p 8765:8765 \
@@ -133,7 +152,7 @@ docker run --rm -p 8765:8765 \
   m3u8-downloader-ph
 ```
 
-#### 纯 Linux Docker（没有 host.docker.internal 时）
+### 纯 Linux Docker（没有 host.docker.internal 时）
 
 任选其一：
 
@@ -148,5 +167,8 @@ docker compose run --rm --add-host=host.docker.internal:host-gateway ...
 export HTTPS_PROXY=http://172.17.0.1:7890
 ```
 
-注意：代理软件需允许来自 Docker 网桥 / `host.docker.internal` 的入站（Clash 等勾选「允许局域网连接」）。
+本机 + Clash 场景若容器仍折腾，也可直接在宿主机跑（代理天然可用）：
 
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 python3 ph_server.py
+```
