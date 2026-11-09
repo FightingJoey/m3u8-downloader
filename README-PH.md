@@ -95,7 +95,8 @@ docker run --rm -p 8765:8765 m3u8-downloader-ph
 **容器不会自动继承** macOS / Windows / OrbStack 系统代理、Clash「系统代理」开关，或宿主机浏览器插件。  
 若日志出现 `SSL: UNEXPECTED_EOF_WHILE_READING` / 直连 `cn.pornhub.com` 失败，多半是容器在国内被墙直连，而不是代码坏了。
 
-`docker-compose.yml` 会把宿主机 shell 里的 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`（及小写）传进容器；Python `urllib` 的 `ProxyHandler` 会读取这些变量。
+`docker-compose.yml` **只**透传大写的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`。  
+**不要** `export http_proxy=`（空值）：CPython 会优先看小写，空的 `http_proxy` 会把已设的大写代理从 `getproxies()` 里删掉，导致 HTTPS 直连超时。Compose 也不再注入空的小写变量。自定义 `docker run` 时同样只设你真正需要的变量。
 
 #### OrbStack / Docker Desktop（推荐）
 

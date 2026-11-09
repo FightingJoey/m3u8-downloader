@@ -264,6 +264,71 @@ def _make_cookie(
     )
 
 
+_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+)
+
+
+def sanitize_proxy_env() -> list[str]:
+    """Drop empty/whitespace *_proxy env keys so they cannot wipe uppercase ones.
+
+    CPython getproxies_environment() prefers lowercase; an empty http_proxy=''
+    removes any HTTP_PROXY that was already collected. Compose ${http_proxy:-}
+    used to inject those empty strings into Docker.
+
+    Returns names that were deleted (for optional logging).
+    """
+    removed: list[str] = []
+    for key in list(os.environ.keys()):
+        if not key.lower().endswith("_proxy"):
+            continue
+        if not (os.environ.get(key) or "").strip():
+            del os.environ[key]
+            removed.append(key)
+    return removed
+
+
+def env_proxies() -> dict[str, str]:
+    """Build an explicit scheme->URL dict for ProxyHandler (never trust getproxies alone).
+
+    Checks both cases; prefers a non-empty value. Maps ALL_PROXY onto http/https
+    when those schemes are missing so urllib always has a tunnel target.
+    """
+    sanitize_proxy_env()
+
+    def _first(*names: str) -> str:
+        for n in names:
+            v = (os.environ.get(n) or "").strip()
+            if v:
+                return v
+        return ""
+
+    http = _first("http_proxy", "HTTP_PROXY")
+    https = _first("https_proxy", "HTTPS_PROXY")
+    all_p = _first("all_proxy", "ALL_PROXY")
+    no_p = _first("no_proxy", "NO_PROXY")
+
+    proxies: dict[str, str] = {}
+    if http:
+        proxies["http"] = http
+    if https:
+        proxies["https"] = https
+    if all_p:
+        proxies["all"] = all_p
+        proxies.setdefault("http", all_p)
+        proxies.setdefault("https", all_p)
+    if no_p:
+        proxies["no"] = no_p
+    return proxies
+
+
 class BrowserSession:
     """共享 CookieJar + 页面/媒体两套请求头，供线程池复用。"""
 
@@ -273,10 +338,10 @@ class BrowserSession:
         self.referer = site_referer(page_url)
         self.cj = http.cookiejar.CookieJar()
         self._lock = threading.RLock()
-        # ProxyHandler() reads HTTP(S)_PROXY / ALL_PROXY / NO_PROXY (and lowercase).
-        # build_opener also auto-adds it when proxy env is set; keep it explicit.
+        # Explicit ProxyHandler dict — empty lowercase env must not disable proxies.
+        proxies = env_proxies()
         self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler(),
+            urllib.request.ProxyHandler(proxies),
             urllib.request.HTTPCookieProcessor(self.cj),
         )
         # addheaders 作为兜底；实际每次 Request 会带完整 headers

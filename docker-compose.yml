@@ -8,16 +8,15 @@ services:
     environment:
       PH_HOST: "0.0.0.0"
       PH_PORT: "8765"
-      # Pass host proxy into the container (Compose substitutes from the shell env).
-      # Unset vars become empty strings and are ignored by urllib.
+      # Only pass UPPERCASE proxy vars. Do NOT inject lowercase http_proxy /
+      # https_proxy / all_proxy / no_proxy with ${var:-}: when the host shell
+      # has them unset, Compose writes empty strings, and CPython's
+      # getproxies_environment() then DELETES matching uppercase entries
+      # (empty lowercase wins). Result: getproxies()=={} and HTTPS goes direct.
       HTTP_PROXY: "${HTTP_PROXY:-}"
       HTTPS_PROXY: "${HTTPS_PROXY:-}"
       ALL_PROXY: "${ALL_PROXY:-}"
       NO_PROXY: "${NO_PROXY:-}"
-      http_proxy: "${http_proxy:-}"
-      https_proxy: "${https_proxy:-}"
-      all_proxy: "${all_proxy:-}"
-      no_proxy: "${no_proxy:-}"
     volumes:
       # Persist rewritten playlists / meta across restarts (optional)
       - ph-cache:/app/cache

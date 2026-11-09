@@ -33,12 +33,14 @@ CACHE.mkdir(exist_ok=True)
 sys.path.insert(0, str(ROOT))
 from download_ph_1080 import (  # noqa: E402
     BrowserSession,
+    env_proxies,
     extract_video_title,  # re-exported helper
     http_find_1080,
     http_get_bytes,
     is_1080_index_v1,
     quality_height_from_url,
     resolve_1080_media_playlist,
+    sanitize_proxy_env,
     viewkey_from_url,
 )
 
@@ -350,41 +352,47 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _safe_proxy_url(v: str) -> str:
+    """Strip userinfo from a proxy URL for logs."""
+    try:
+        p = urlparse(v)
+        if p.hostname:
+            host = p.hostname
+            port = f":{p.port}" if p.port else ""
+            scheme = f"{p.scheme}://" if p.scheme else ""
+            return f"{scheme}{host}{port}"
+        return v.split("@")[-1]
+    except Exception:
+        return v.split("@")[-1]
+
+
 def _proxy_env_summary() -> str:
-    """One-line proxy status for startup logs (host:port only, no credentials)."""
-    keys = (
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "https_proxy",
-        "http_proxy",
-        "all_proxy",
-    )
+    """One-line proxy status after sanitize (host:port only, no credentials)."""
+    proxies = env_proxies()
+    if not proxies:
+        return "(未设置；直连，国内常因墙出现 SSL UNEXPECTED_EOF)"
+    order = ("https", "http", "all", "no")
     seen: list[str] = []
-    for k in keys:
-        v = (os.environ.get(k) or "").strip()
+    for scheme in order:
+        v = proxies.get(scheme)
         if not v:
             continue
-        # Strip userinfo if present: scheme://user:pass@host:port -> scheme://host:port
-        try:
-            p = urlparse(v)
-            if p.hostname:
-                host = p.hostname
-                port = f":{p.port}" if p.port else ""
-                scheme = f"{p.scheme}://" if p.scheme else ""
-                safe = f"{scheme}{host}{port}"
-            else:
-                safe = v.split("@")[-1]
-        except Exception:
-            safe = v.split("@")[-1]
-        seen.append(f"{k}={safe}")
-    no_proxy = (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").strip()
-    if no_proxy:
-        seen.append(f"NO_PROXY={no_proxy}")
-    return ", ".join(seen) if seen else "(未设置；直连，国内常因墙出现 SSL UNEXPECTED_EOF)"
+        label = "NO_PROXY" if scheme == "no" else f"{scheme.upper()}_PROXY"
+        seen.append(f"{label}={_safe_proxy_url(v)}")
+    return ", ".join(seen)
 
 
 def main() -> int:
+    # Empty lowercase http_proxy='' (Compose ${http_proxy:-}) wipes uppercase in getproxies().
+    before = __import__("urllib.request").request.getproxies()
+    removed = sanitize_proxy_env()
+    after = env_proxies()
+    if removed and after and not before:
+        print(
+            "[warn] 已清除空的小写代理变量 "
+            f"({', '.join(removed)})；此前 getproxies() 为空，HTTPS 会直连失败"
+        )
+
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[ok] Pornhub + m3u8-downloader 桥接服务")
     print(f"[ok] 打开: http://{HOST}:{PORT}/")
