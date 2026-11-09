@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 本地桥接服务：在 m3u8-downloader 页面里输入 Pornhub 视频页 URL，
-后端调用 download_ph_1080.py 取 1080P index-v1-a1.m3u8，
+后端调用 download_ph_1080.py 取最高可用清晰度的 index-v1-a1.m3u8，
 把分片 URL 改写为同源 /proxy，前端仍用原有 JS 分片下载 + mux-mp4 合成。
 
 用法:
@@ -37,6 +37,7 @@ from download_ph_1080 import (  # noqa: E402
     http_find_1080,
     http_get_bytes,
     is_1080_index_v1,
+    quality_height_from_url,
     resolve_1080_media_playlist,
     viewkey_from_url,
 )
@@ -151,7 +152,7 @@ def resolve_ph(page_url: str) -> dict:
     session = BrowserSession(page_url)
     source, referer, notes, title = http_find_1080(session, page_url)
     if not source:
-        msg = "；".join(notes) if notes else "未找到 1080P m3u8（可能无 1080 / 下架 / 地区限制）"
+        msg = "；".join(notes) if notes else "未找到可用 m3u8（可能下架 / 地区限制 / 无 HLS 源）"
         return {"ok": False, "error": msg, "notes": notes, "title": title}
 
     try:
@@ -180,6 +181,7 @@ def resolve_ph(page_url: str) -> dict:
                 "referer": referer,
                 "viewkey": vk,
                 "title": title,
+                "quality": quality_height_from_url(media_url) or None,
             },
             ensure_ascii=False,
             indent=2,
@@ -201,6 +203,7 @@ def resolve_ph(page_url: str) -> dict:
         for ln in body.splitlines()
         if ln.strip() and not ln.strip().startswith("#") and ".m3u8" not in ln
     )
+    quality = quality_height_from_url(media_url) or quality_height_from_url(source)
     return {
         "ok": True,
         "job_id": job_id,
@@ -208,6 +211,7 @@ def resolve_ph(page_url: str) -> dict:
         "media_url": media_url,
         "source": source,
         "segment_count": seg_count,
+        "quality": quality or None,
         "is_1080_index_v1": is_1080_index_v1(media_url),
         "viewkey": vk,
         "title": title,

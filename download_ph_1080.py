@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-从 Pornhub 视频页只抓取 1080P 的 index-v1-a1.m3u8，下载全部分片，
+从 Pornhub 视频页抓取「最高可用清晰度」的 index-v1-a1.m3u8，下载全部分片，
 再用 FFmpeg 合并成一条视频（默认 ./out/video_1080p.mp4）。
 
 依赖:
@@ -18,7 +18,7 @@
 
 策略:
   1) HTTP GET 页面（带年龄 Cookie + 浏览器级请求头），从 mediaDefinitions / HTML 提取 .m3u8
-  2) 只选含 1080P 且指向 index-v1-a1 的媒体播放列表（master 会自动展开）
+  2) 在所有清晰度中选最高，并优先 index-v1-a1 媒体播放列表（master 会自动展开）
   3) CDN 分片请求使用真实浏览器媒体请求头（Referer/Origin/Sec-Fetch-*）+ Cookie jar
   4) 470/410 时在 ev-h / hv-h 等主机间故障转移
   5) FFmpeg concat 合并，优先 -c copy，失败再转码
@@ -488,11 +488,45 @@ def extract_m3u8_urls(html: str) -> list[str]:
     return out
 
 
-def extract_media_definition_urls(html: str) -> list[str]:
-    """解析 flashvars.mediaDefinitions[*].videoUrl。"""
+def quality_height_from_url(url: str) -> int:
+    """从 CDN 路径识别清晰度高度（2160/1440/1080/720/480/240 等）。"""
+    path = urlparse(url).path or ""
+    # Pornhub 常见：/1080P_4000K_.../ 或 /720P_/
+    m = re.search(r"(?:^|/)(\d{3,4})[pP](?:_|/|$)", path)
+    if m:
+        return int(m.group(1))
+    low = path.lower()
+    for h in (2160, 1440, 1080, 720, 480, 360, 240):
+        if f"{h}p" in low:
+            return h
+    return 0
+
+
+def quality_height_from_field(quality) -> int:
+    """解析 mediaDefinitions[*].quality（可为 int/str/list）。"""
+    if quality is None:
+        return 0
+    if isinstance(quality, bool):
+        return 0
+    if isinstance(quality, (int, float)):
+        return int(quality)
+    if isinstance(quality, (list, tuple)):
+        best = 0
+        for item in quality:
+            best = max(best, quality_height_from_field(item))
+        return best
+    s = str(quality).strip().lower()
+    if not s or s in ("false", "true", "auto"):
+        return 0
+    m = re.search(r"(\d{3,4})", s)
+    return int(m.group(1)) if m else 0
+
+
+def extract_media_definition_entries(html: str) -> list[tuple[str, int]]:
+    """解析 flashvars.mediaDefinitions[*] -> (videoUrl, quality_height)。"""
     import json
 
-    out: list[str] = []
+    out: list[tuple[str, int]] = []
     key = '"mediaDefinitions"'
     pos = 0
     while True:
@@ -526,10 +560,20 @@ def extract_media_definition_urls(html: str) -> list[str]:
                 if not isinstance(item, dict):
                     continue
                 vu = item.get("videoUrl")
-                if isinstance(vu, str) and ".m3u8" in vu:
-                    out.append(vu.replace("\\/", "/").replace("&amp;", "&"))
+                if not isinstance(vu, str) or ".m3u8" not in vu:
+                    continue
+                u = vu.replace("\\/", "/").replace("&amp;", "&")
+                h = quality_height_from_field(item.get("quality"))
+                if h <= 0:
+                    h = quality_height_from_url(u)
+                out.append((u, h))
         pos = end
     return out
+
+
+def extract_media_definition_urls(html: str) -> list[str]:
+    """解析 flashvars.mediaDefinitions[*].videoUrl。"""
+    return [u for u, _h in extract_media_definition_entries(html)]
 
 
 def url_token_style(url: str) -> str:
@@ -569,9 +613,17 @@ def is_1080_index_v1(url: str) -> bool:
     return ("1080p" in low or "1080P" in path) and "index-v1-a1.m3u8" in low
 
 
+def is_index_v1_a1(url: str) -> bool:
+    return "index-v1-a1.m3u8" in (urlparse(url).path or "").lower()
+
+
 def is_1080_master_or_media(url: str) -> bool:
-    path = urlparse(url).path
-    return "1080P" in path or "1080p" in path.lower()
+    """兼容旧名：路径含任意已知清晰度即视为 HLS 候选（不仅 1080）。"""
+    return quality_height_from_url(url) > 0 or ".m3u8" in url.lower()
+
+
+def is_hls_candidate_url(url: str) -> bool:
+    return ".m3u8" in (url or "").lower()
 
 
 def child_playlist_urls(master_url: str, body: str) -> list[str]:
@@ -605,14 +657,13 @@ def parse_media_segments(playlist_url: str, body: str) -> tuple[str | None, list
     return init, segs
 
 
-def score_1080_candidate(url: str) -> tuple[int, int, int]:
-    """Higher is better. Prefer validfrom+hash、ev-h、index-v1-a1、高码率；惩罚 h/e 与 hv-h。"""
+def score_hls_candidate(url: str, height_hint: int = 0) -> tuple[int, int, int, int]:
+    """Higher is better: height, then validfrom/index/ev-h/bitrate。"""
     path = urlparse(url).path
     host = (urlparse(url).hostname or "").lower()
+    height = height_hint or quality_height_from_url(url)
     score = 0
-    if "1080P" in path or "1080p" in path.lower():
-        score += 100
-    if "index-v1-a1.m3u8" in path.lower():
+    if is_index_v1_a1(url):
         score += 50
     if path.lower().endswith("master.m3u8"):
         score += 10  # usable via expand
@@ -627,26 +678,50 @@ def score_1080_candidate(url: str) -> tuple[int, int, int]:
         score -= 40
     m = re.search(r"(\d+)K_", path)
     kbps = int(m.group(1)) if m else 0
-    # tertiary: prefer longer query (usually intact tokens)
-    return score, kbps, len(url)
+    return height, score, kbps, len(url)
 
 
-def pick_1080_source(urls: list[str]) -> str | None:
-    cands = [u for u in urls if is_1080_master_or_media(u)]
+def score_1080_candidate(url: str) -> tuple[int, int, int]:
+    """兼容旧接口：忽略高度主序，仅返回次级分数三元组。"""
+    _h, score, kbps, n = score_hls_candidate(url)
+    return score, kbps, n
+
+
+def pick_best_hls_source(
+    urls: list[str],
+    height_by_url: dict[str, int] | None = None,
+) -> str | None:
+    """在全部 m3u8 候选中选最高清晰度；同高度再按 validfrom / index-v1-a1 等偏好。"""
+    height_by_url = height_by_url or {}
+    cands = [u for u in urls if is_hls_candidate_url(u)]
     if not cands:
         return None
-    cands.sort(key=score_1080_candidate, reverse=True)
-    # Prefer explicit validfrom index/master first
-    for u in cands:
-        if url_token_style(u) == "validfrom" and is_1080_index_v1(u):
+
+    def key(u: str) -> tuple[int, int, int, int]:
+        return score_hls_candidate(u, height_by_url.get(u, 0))
+
+    cands.sort(key=key, reverse=True)
+    best_h = key(cands[0])[0]
+    top = [u for u in cands if key(u)[0] == best_h] if best_h > 0 else list(cands)
+
+    for u in top:
+        if url_token_style(u) == "validfrom" and is_index_v1_a1(u):
             return u
-    for u in cands:
+    for u in top:
         if url_token_style(u) == "validfrom":
             return u
-    for u in cands:
-        if is_1080_index_v1(u):
+    for u in top:
+        if is_index_v1_a1(u):
             return u
-    return cands[0]
+    return top[0]
+
+
+def pick_1080_source(
+    urls: list[str],
+    height_by_url: dict[str, int] | None = None,
+) -> str | None:
+    """兼容旧名：实际选择最高可用清晰度。"""
+    return pick_best_hls_source(urls, height_by_url)
 
 
 def _with_cdn_host(url: str, host: str) -> str:
@@ -672,7 +747,7 @@ def resolve_1080_media_playlist(
             if alt not in attempts:
                 attempts.append(alt)
 
-    best: tuple[str, str, int] | None = None  # url, body, rank
+    best: tuple[str, str, int, int] | None = None  # url, body, rank, height
 
     def rank_body(body: str) -> int:
         style = playlist_body_style(body)
@@ -705,13 +780,8 @@ def resolve_1080_media_playlist(
             ".m3u8" in ln and not ln.strip().startswith("#") for ln in body.splitlines()
         ):
             children = child_playlist_urls(final, body)
-            children.sort(
-                key=lambda u: (
-                    0 if "index-v1-a1" in u.lower() else 1,
-                    0 if url_token_style(u) == "validfrom" else 1,
-                    u,
-                ),
-            )
+            # 先试更高清晰度子列表
+            children.sort(key=lambda u: score_hls_candidate(u), reverse=True)
             for child in children:
                 try:
                     cfinal, cbody = http_get_text(
@@ -725,12 +795,21 @@ def resolve_1080_media_playlist(
 
         for mu, mb in candidates_bodies:
             r = rank_body(mb)
+            h = quality_height_from_url(mu)
             style = playlist_body_style(mb)
-            print(f"[info] 候选媒体列表 style={style} rank={r} host={urlparse(mu).hostname}")
-            if best is None or r > best[2]:
-                best = (mu, mb, r)
-            if r >= 100:
-                return mu, mb
+            print(
+                f"[info] 候选媒体列表 style={style} rank={r} height={h or '?'} "
+                f"host={urlparse(mu).hostname}"
+            )
+            if best is None or (r, h) > (best[2], best[3]):
+                best = (mu, mb, r, h)
+            # 已是优选 validfrom_ts 且当前批里高度最高时即可返回；
+            # 同一次 src 内继续扫完以尽量拿到更高清晰度。
+            # 若 rank 已满分且高度不低，留到本轮 candidates 结束再定。
+
+        # 本轮 src 结束后，若已有满分 validfrom_ts，直接用当前 best
+        if best is not None and best[2] >= 100:
+            return best[0], best[1]
 
     if best and best[2] >= 0:
         if best[2] < 100:
@@ -742,14 +821,27 @@ def resolve_1080_media_playlist(
     raise RuntimeError(f"无法从 {source_url[:120]} 解析出媒体播放列表")
 
 
+def collect_m3u8_with_heights(html: str) -> tuple[list[str], dict[str, int]]:
+    """提取全部 m3u8，并合并 mediaDefinitions.quality / 路径中的清晰度。"""
+    height_by: dict[str, int] = {}
+    for u, h in extract_media_definition_entries(html):
+        height_by[u] = max(height_by.get(u, 0), h or 0)
+    urls = extract_m3u8_urls(html)
+    for u in urls:
+        h = height_by.get(u, 0) or quality_height_from_url(u)
+        height_by[u] = h
+    return urls, height_by
+
+
 def collect_m3u8_from_html(html: str) -> list[str]:
-    return extract_m3u8_urls(html)
+    urls, _ = collect_m3u8_with_heights(html)
+    return urls
 
 
 def http_find_1080(
     session: BrowserSession, url: str, *, max_page_tries: int = 5
 ) -> tuple[str | None, str, list[str], str | None]:
-    """从视频页取 1080P 源。页面会在 validfrom / h=e 间轮换，故多次拉取并优先 validfrom。
+    """从视频页取最高清晰度 HLS 源。页面会在 validfrom / h=e 间轮换，故多次拉取并优先 validfrom。
 
     Returns: (source_m3u8, referer, notes, title)
     """
@@ -792,15 +884,20 @@ def http_find_1080(
             notes.append(f"页面被重定向离开视频（可能不可用）; viewkey={vk}")
             print(f"[warn] {notes[-1]}")
 
-        urls = collect_m3u8_from_html(html)
+        urls, height_by = collect_m3u8_with_heights(html)
         styles = {}
+        heights = {}
         for u in urls:
             styles[url_token_style(u)] = styles.get(url_token_style(u), 0) + 1
-        print(f"[info] HTML 中发现 {len(urls)} 个 .m3u8 ({styles})")
-        picked = pick_1080_source(urls)
+            h = height_by.get(u, 0) or quality_height_from_url(u)
+            if h:
+                heights[h] = heights.get(h, 0) + 1
+        print(f"[info] HTML 中发现 {len(urls)} 个 .m3u8 ({styles}); 清晰度={heights or '{}'}")
+        picked = pick_1080_source(urls, height_by)
         if picked:
             st = url_token_style(picked)
-            print(f"[info] 选中源 style={st}: {picked[:140]}")
+            qh = height_by.get(picked, 0) or quality_height_from_url(picked)
+            print(f"[info] 选中源 style={st} quality={qh or '?'}P: {picked[:140]}")
             if st == "validfrom":
                 return picked, session.referer, notes, page_title
             if st == "h_e" and best_he is None:
@@ -835,10 +932,12 @@ def http_find_1080(
                 page_title = extract_video_title(ehtml)
                 if page_title:
                     print(f"[info] 标题(embed): {page_title}")
-            urls = collect_m3u8_from_html(ehtml)
-            picked = pick_1080_source(urls)
+            urls, height_by = collect_m3u8_with_heights(ehtml)
+            picked = pick_1080_source(urls, height_by)
             if picked:
                 session.update_referer(efinal)
+                qh = height_by.get(picked, 0) or quality_height_from_url(picked)
+                print(f"[info] embed 选中 style={url_token_style(picked)} quality={qh or '?'}P")
                 if url_token_style(picked) == "validfrom":
                     return picked, session.referer, notes, page_title
                 if best_he is None:
@@ -868,7 +967,7 @@ def browser_find_1080(url: str, headed: bool) -> str | None:
             return
         if ".m3u8" not in rurl:
             return
-        if is_1080_master_or_media(rurl):
+        if is_hls_candidate_url(rurl):
             found.append(rurl)
             print(f"[info] 网络命中: {rurl[:140]}")
 
@@ -922,7 +1021,7 @@ def browser_find_1080(url: str, headed: bool) -> str | None:
         try:
             html = page.content()
             for u in collect_m3u8_from_html(html):
-                if is_1080_master_or_media(u):
+                if is_hls_candidate_url(u):
                     found.append(u)
         except Exception as e:
             print(f"[warn] DOM: {e}")
@@ -946,7 +1045,7 @@ def browser_find_1080(url: str, headed: bool) -> str | None:
                 }"""
             )
             for u in md or []:
-                if is_1080_master_or_media(u):
+                if is_hls_candidate_url(u):
                     found.append(u)
         except Exception as e:
             print(f"[warn] flashvars: {e}")
@@ -1157,16 +1256,17 @@ def main() -> int:
         for n in notes:
             print(f"[note] {n}")
         print(
-            "[fail] 未找到 1080P m3u8。常见原因：无 1080 清晰度、视频下架、地区限制。"
+            "[fail] 未找到可用 m3u8。常见原因：视频下架、地区限制、页面无 HLS 源。"
             "可试 --headed，或开启「流量经本机转发」。"
         )
         return 1
 
     print(f"[info] 选中源: {source}")
     media_url, body = resolve_1080_media_playlist(session, source, referer)
-    if not is_1080_index_v1(media_url) and "1080" not in media_url:
-        print(f"[warn] 媒体列表路径不含 1080/index-v1-a1: {media_url}")
-    print(f"[info] 1080 媒体列表: {media_url}")
+    qh = quality_height_from_url(media_url)
+    if not is_index_v1_a1(media_url):
+        print(f"[warn] 媒体列表路径不含 index-v1-a1: {media_url}")
+    print(f"[info] 媒体列表 quality={qh or '?'}P: {media_url}")
     PLAYLIST_PATH.write_text(body, encoding="utf-8")
     print(f"[ok] 已保存播放列表 -> {PLAYLIST_PATH.resolve()}")
 

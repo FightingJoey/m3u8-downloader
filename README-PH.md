@@ -3,7 +3,7 @@
 在原版 [m3u8-downloader](https://github.com/Momo707577045/m3u8-downloader) 基础上，同时支持两种输入：
 
 1. **URL 含 `m3u8`**：当作播放列表，走原前端直接解析 / 分片下载（不调 `/api/resolve`）
-2. **URL 不含 `m3u8`**：当作 Pornhub 视频页，后端用 `download_ph_1080.py` 抓 **1080P `index-v1-a1.m3u8`**，再走原分片下载 + `mux-mp4.js`；合成后的 MP4 **用原视频标题命名**
+2. **URL 不含 `m3u8`**：当作 Pornhub 视频页，后端用 `download_ph_1080.py` 抓 **最高可用清晰度** 的 `index-v1-a1.m3u8`（2160/1080/720/480…），再走原分片下载 + `mux-mp4.js`；合成后的 MP4 **用原视频标题命名**
 
 ## 怎么跑
 
@@ -18,13 +18,13 @@ python3 ph_server.py
    - 视频页：`https://cn.pornhub.com/view_video.php?viewkey=XXXX`（URL 中无 `m3u8`）
    - 或直接粘贴 `.m3u8` / 含 `m3u8` 的播放列表 URL
 2. 点 **「转码为MP4下载」**（或「原格式下载」）
-3. 视频页模式：等待「已取到 1080P 播放列表」，分片下载后合成；MP4 文件名优先用页面原标题（`og:title` 等），缺省才用 viewkey
+3. 视频页模式：等待「已取到 xxxP / 最高清晰度播放列表」，分片下载后合成；MP4 文件名优先用页面原标题（`og:title` 等），缺省才用 viewkey
 
 ## 原理
 
 | 步骤 | 谁做 |
 |------|------|
-| 打开视频页、选 1080P `*index-v1-a1.m3u8` | `download_ph_1080.py`（`http_find_1080` / `resolve_1080_media_playlist`） |
+| 打开视频页、选最高清晰度 `*index-v1-a1.m3u8` | `download_ph_1080.py`（`http_find_1080` / `resolve_1080_media_playlist`） |
 | 把分片 URL 改写为同源 `/proxy` | `ph_server.py` |
 | 解析 m3u8、多线程下分片、AES、mux 成 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
 
@@ -44,13 +44,13 @@ API：
 ## 文件
 
 - `ph_server.py` — 静态站 + 取链 API + CDN 代理
-- `download_ph_1080.py` — Pornhub 1080P 取链（从工作区拷入）
+- `download_ph_1080.py` — Pornhub 最高清晰度取链（从工作区拷入）
 - `index.html` — 按 URL 是否含 `m3u8` 分流；视频页走 `/api/resolve`；MP4 用 API 返回的 `title` 命名
 - `cache/` — 解析得到的原始/改写 m3u8（本地缓存）
 
 ## 注意
 
-- 视频下架、无 1080、地区限制时，`/api/resolve` 会返回错误文案。
+- 视频下架、无 HLS、地区限制时，`/api/resolve` 会返回错误文案；有多档清晰度时自动选最高。
 - 任务约 1 小时过期；过期后重新点解析即可。
 - 请勿把本改动推送到上游仓库，除非作者要求。
 
@@ -70,7 +70,7 @@ Pornhub 页面里的 `mediaDefinitions` 会在两种签名间轮换：
 2. **错误/不兼容**：`hv-h.phncdn.com` + `?h=...&e=...&f=1`，展开后常为 `seg-*.m4s` + `#EXT-X-MAP`（fMP4）
 
 `download_ph_1080.py` / `ph_server.py` 会：
-- 解析 `mediaDefinitions`，**优先选 validfrom+hash**
+- 解析 `mediaDefinitions`，**选最高清晰度**，同档再**优先 validfrom+hash**
 - 若当次页面只有 h/e，**自动重试拉页**直到拿到 validfrom
 - 解析后校验播放列表正文；拒绝在仍有更好候选时使用 fMP4 / h-e 变体
 - 改写给前端的 `/proxy` URL 完整保留 query（含 `%2F` / `%3D`），避免签名损坏

@@ -439,7 +439,7 @@
     </a>
 
     <!--文件载入-->
-    <div class="m-p-temp-url">双模式：URL 含 m3u8 → 直接解析下载；不含 m3u8 → 按 Pornhub 视频页抓取 1080P m3u8（合成 MP4 用原标题命名）</div>
+    <div class="m-p-temp-url">双模式：URL 含 m3u8 → 直接解析下载；不含 m3u8 → 按 Pornhub 视频页抓取最高清晰度 m3u8（合成 MP4 用原标题命名）</div>
     <section class="m-p-input-container">
       <input type="text" v-model="url" :disabled="downloading" placeholder="m3u8 链接，或 Pornhub 视频页（不含 m3u8 的 view_video / viewkey）">
 
@@ -698,10 +698,10 @@
         return s.indexOf('view_video.php') > -1 || s.indexOf('viewkey=') > -1 || s.indexOf('/embed/') > -1
       },
 
-      // 调用本地 ph_server：download_ph_1080 取 1080P index-v1-a1.m3u8，再走原有解析下载
+      // 调用本地 ph_server：download_ph_1080 取最高清晰度 index-v1-a1.m3u8，再走原有解析下载
       resolvePornhubThen(onlyGetRange) {
         const pageUrl = this.url
-        this.tips = '正在从 Pornhub 解析 1080P m3u8（download_ph_1080）…'
+        this.tips = '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…'
         fetch('/api/resolve?url=' + encodeURIComponent(pageUrl))
           .then((r) => r.json().then((data) => ({ status: r.status, data })))
           .then(({ data }) => {
@@ -718,7 +718,8 @@
               this.openStreamWriter(this.pendingStreamIsMp4)
               this.pendingStreamIsMp4 = null
             }
-            this.tips = '已取到 1080P 播放列表（分片 ' + (data.segment_count || '?') + '）' +
+            const qlabel = data.quality ? (data.quality + 'P') : '最高清晰度'
+            this.tips = '已取到 ' + qlabel + ' 播放列表（分片 ' + (data.segment_count || '?') + '）' +
               (this.title ? ('，文件名: ' + this.title) : '') + '，开始下载…'
             // 必须用绝对 URL，否则旧 applyURL 会把 /proxy 拼成错误主机导致全部分片失败
             this.url = new URL(data.playlist_url, location.href).href
