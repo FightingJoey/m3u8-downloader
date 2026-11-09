@@ -1,0 +1,13 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.cache
+cache
+_sessions
+out
+*.tgz
+.idea
+todo.md
+intro.md
+imgs/.DS_Store

@@ -75,3 +75,18 @@ Pornhub 页面里的 `mediaDefinitions` 会在两种签名间轮换：
 - 解析后校验播放列表正文；拒绝在仍有更好候选时使用 fMP4 / h-e 变体
 - 改写给前端的 `/proxy` URL 完整保留 query（含 `%2F` / `%3D`），避免签名损坏
 
+## Docker
+
+```bash
+# 构建并启动（默认 http://127.0.0.1:8765/）
+docker compose up -d --build
+
+# 或不用 Compose
+docker build -t m3u8-downloader-ph .
+docker run --rm -p 8765:8765 m3u8-downloader-ph
+```
+
+换端口：`PH_PORT=9000 docker compose up -d --build`（映射到宿主机 9000）。
+
+说明：镜像只含 Python 标准库桥接服务，**未**安装 Playwright/Chromium；取链走 HTTP。公开暴露前请自行加反向代理鉴权，勿当作开放下载站。
+

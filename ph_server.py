@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -40,8 +41,8 @@ from download_ph_1080 import (  # noqa: E402
     viewkey_from_url,
 )
 
-HOST = "127.0.0.1"
-PORT = 8765
+HOST = os.environ.get("PH_HOST", "0.0.0.0")
+PORT = int(os.environ.get("PH_PORT", "8765"))
 
 # job_id -> {session, referer, media_url, created}
 _JOBS: dict[str, dict] = {}
