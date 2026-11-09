@@ -350,12 +350,47 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _proxy_env_summary() -> str:
+    """One-line proxy status for startup logs (host:port only, no credentials)."""
+    keys = (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    )
+    seen: list[str] = []
+    for k in keys:
+        v = (os.environ.get(k) or "").strip()
+        if not v:
+            continue
+        # Strip userinfo if present: scheme://user:pass@host:port -> scheme://host:port
+        try:
+            p = urlparse(v)
+            if p.hostname:
+                host = p.hostname
+                port = f":{p.port}" if p.port else ""
+                scheme = f"{p.scheme}://" if p.scheme else ""
+                safe = f"{scheme}{host}{port}"
+            else:
+                safe = v.split("@")[-1]
+        except Exception:
+            safe = v.split("@")[-1]
+        seen.append(f"{k}={safe}")
+    no_proxy = (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").strip()
+    if no_proxy:
+        seen.append(f"NO_PROXY={no_proxy}")
+    return ", ".join(seen) if seen else "(未设置；直连，国内常因墙出现 SSL UNEXPECTED_EOF)"
+
+
 def main() -> int:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[ok] Pornhub + m3u8-downloader 桥接服务")
     print(f"[ok] 打开: http://{HOST}:{PORT}/")
     print(f"[ok] 输入 Pornhub 视频页 URL，点「转码为MP4下载」")
     print(f"[ok] 取链逻辑: download_ph_1080.py；分片+合成: 原 index.html / mux-mp4.js")
+    print(f"[ok] 代理环境: {_proxy_env_summary()}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

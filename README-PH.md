@@ -90,3 +90,62 @@ docker run --rm -p 8765:8765 m3u8-downloader-ph
 
 说明：镜像只含 Python 标准库桥接服务，**未**安装 Playwright/Chromium；取链走 HTTP。公开暴露前请自行加反向代理鉴权，勿当作开放下载站。
 
+### 容器里访问外网：必须显式传入代理
+
+**容器不会自动继承** macOS / Windows / OrbStack 系统代理、Clash「系统代理」开关，或宿主机浏览器插件。  
+若日志出现 `SSL: UNEXPECTED_EOF_WHILE_READING` / 直连 `cn.pornhub.com` 失败，多半是容器在国内被墙直连，而不是代码坏了。
+
+`docker-compose.yml` 会把宿主机 shell 里的 `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY`（及小写）传进容器；Python `urllib` 的 `ProxyHandler` 会读取这些变量。
+
+#### OrbStack / Docker Desktop（推荐）
+
+代理跑在**宿主机**时，容器里要用 `host.docker.internal`，**不要**写 `127.0.0.1`（那是容器自己，不是宿主机）。
+
+假设 Clash / V2Ray / Surge 等 HTTP 端口为 `7890`：
+
+```bash
+export HTTPS_PROXY=http://host.docker.internal:7890
+export HTTP_PROXY=http://host.docker.internal:7890
+export ALL_PROXY=http://host.docker.internal:7890
+# 若客户端只开 SOCKS，可改用：
+# export ALL_PROXY=socks5h://host.docker.internal:7890
+export NO_PROXY=localhost,127.0.0.1,host.docker.internal
+docker compose up -d --build
+```
+
+启动日志应出现一行类似：
+
+```text
+[ok] 代理环境: HTTPS_PROXY=http://host.docker.internal:7890, HTTP_PROXY=http://host.docker.internal:7890, ...
+```
+
+若显示「未设置」，说明 compose 启动时 shell 里没有这些变量。
+
+#### 不用 Compose 的 docker run 示例
+
+```bash
+docker run --rm -p 8765:8765 \
+  -e HTTPS_PROXY=http://host.docker.internal:7890 \
+  -e HTTP_PROXY=http://host.docker.internal:7890 \
+  -e ALL_PROXY=http://host.docker.internal:7890 \
+  -e NO_PROXY=localhost,127.0.0.1,host.docker.internal \
+  m3u8-downloader-ph
+```
+
+#### 纯 Linux Docker（没有 host.docker.internal 时）
+
+任选其一：
+
+```bash
+# 方式 A：启动时注入主机网关别名
+docker compose run --rm --add-host=host.docker.internal:host-gateway ...
+# 或在 docker-compose.yml 的 service 下加：
+# extra_hosts:
+#   - "host.docker.internal:host-gateway"
+
+# 方式 B：直接写宿主机网关 IP（常见为 172.17.0.1，以 ip route 为准）
+export HTTPS_PROXY=http://172.17.0.1:7890
+```
+
+注意：代理软件需允许来自 Docker 网桥 / `host.docker.internal` 的入站（Clash 等勾选「允许局域网连接」）。
+

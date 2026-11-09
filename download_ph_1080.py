@@ -273,8 +273,11 @@ class BrowserSession:
         self.referer = site_referer(page_url)
         self.cj = http.cookiejar.CookieJar()
         self._lock = threading.RLock()
+        # ProxyHandler() reads HTTP(S)_PROXY / ALL_PROXY / NO_PROXY (and lowercase).
+        # build_opener also auto-adds it when proxy env is set; keep it explicit.
         self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self.cj)
+            urllib.request.ProxyHandler(),
+            urllib.request.HTTPCookieProcessor(self.cj),
         )
         # addheaders 作为兜底；实际每次 Request 会带完整 headers
         self.opener.addheaders = [
