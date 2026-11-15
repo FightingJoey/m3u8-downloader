@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-本地桥接服务：在 m3u8-downloader 页面里输入 Pornhub 视频页 URL，
-后端调用 download_ph_1080.py 取最高可用清晰度的 index-v1-a1.m3u8，
-把分片 URL 改写为同源 /proxy，前端仍用原有 JS 分片下载 + mux-mp4 合成。
+本地桥接服务：在 m3u8-downloader 页面里输入视频页 URL，
+后端按站点取最高可用清晰度 m3u8，把分片 URL 改写为同源 /proxy，
+前端仍用原有 JS 分片下载 + mux-mp4 合成。
+
+支持:
+  - Pornhub 视频页（download_ph_1080.py）
+  - pornhd3x.tv / wwwN.pornhd3x.tv 影片页（download_phd3x.py；代理会剥 PNG 包装的 TS）
 
 用法:
   python3 ph_server.py
   # 浏览器打开 http://127.0.0.1:8765/
-  # 输入 https://cn.pornhub.com/view_video.php?viewkey=XXXX
+  # 输入 Pornhub view_video 或 pornhd3x.tv /movies/... 链接
 """
 
 from __future__ import annotations
@@ -42,6 +46,11 @@ from download_ph_1080 import (  # noqa: E402
     resolve_1080_media_playlist,
     sanitize_proxy_env,
     viewkey_from_url,
+)
+from download_phd3x import (  # noqa: E402
+    is_phd3x_page,
+    resolve_phd3x,
+    strip_png_wrapped_ts,
 )
 
 HOST = os.environ.get("PH_HOST", "0.0.0.0")
@@ -221,6 +230,89 @@ def resolve_ph(page_url: str) -> dict:
     }
 
 
+
+def resolve_phd3x_job(page_url: str) -> dict:
+    """把 download_phd3x.resolve_phd3x 的结果写成与 Pornhub 相同的 API 形态。"""
+    _purge_old_jobs()
+    got = resolve_phd3x(page_url)
+    if not got.get("ok"):
+        return {
+            "ok": False,
+            "error": got.get("error") or "pornhd3x 解析失败",
+            "notes": got.get("notes") or [],
+            "title": got.get("title"),
+            "episode_id": got.get("episode_id"),
+            "quality": got.get("quality"),
+        }
+
+    job_id = uuid.uuid4().hex[:12]
+    media_url = got["media_url"]
+    body = got["body"]
+    title = got.get("title")
+    rewritten = rewrite_playlist_for_proxy(media_url, body, job_id)
+    playlist_name = f"{job_id}_media.m3u8"
+    raw_name = f"{job_id}_raw.m3u8"
+    (CACHE / raw_name).write_text(body, encoding="utf-8")
+    (CACHE / playlist_name).write_text(rewritten, encoding="utf-8")
+    (CACHE / f"{job_id}_meta.json").write_text(
+        json.dumps(
+            {
+                "site": "phd3x",
+                "page_url": got.get("page_url") or page_url,
+                "source": got.get("source"),
+                "media_url": media_url,
+                "episode_id": got.get("episode_id"),
+                "title": title,
+                "quality": got.get("quality"),
+                "quality_label": got.get("quality_label"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "session": got["session"],
+            "referer": None,
+            "no_referer": True,
+            "site": "phd3x",
+            "media_url": media_url,
+            "created": time.time(),
+            "title": title,
+        }
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "playlist_url": f"/cache/{playlist_name}",
+        "media_url": media_url,
+        "source": got.get("source"),
+        "segment_count": got.get("segment_count") or 0,
+        "quality": got.get("quality") or None,
+        "quality_label": got.get("quality_label"),
+        "episode_id": got.get("episode_id"),
+        "title": title,
+        "notes": got.get("notes") or [],
+        "site": "phd3x",
+    }
+
+
+def resolve_page(page_url: str) -> dict:
+    page_url = (page_url or "").strip()
+    if not page_url.startswith("http"):
+        return {"ok": False, "error": "URL 必须以 http/https 开头"}
+    if is_phd3x_page(page_url):
+        return resolve_phd3x_job(page_url)
+    if _is_ph_page(page_url):
+        return resolve_ph(page_url)
+    return {
+        "ok": False,
+        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）或 pornhd3x.tv 影片页（/movies/…）",
+    }
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -263,7 +355,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not url:
                 return self._send_json(400, {"ok": False, "error": "缺少 url 参数"})
             try:
-                result = resolve_ph(unquote(url))
+                result = resolve_page(unquote(url))
                 return self._send_json(200 if result.get("ok") else 502, result)
             except Exception as e:
                 traceback.print_exc()
@@ -308,7 +400,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not url:
             return self._send_json(400, {"ok": False, "error": "缺少 url"})
         try:
-            result = resolve_ph(url)
+            result = resolve_page(url)
             return self._send_json(200 if result.get("ok") else 502, result)
         except Exception as e:
             traceback.print_exc()
@@ -326,20 +418,35 @@ class Handler(SimpleHTTPRequestHandler):
             job = _JOBS.get(job_id)
         if not job:
             return self._send_json(
-                410, {"ok": False, "error": "任务已过期，请重新解析 Pornhub 链接"}
+                410, {"ok": False, "error": "任务已过期，请重新解析视频页链接"}
             )
 
-        session: BrowserSession = job["session"]
-        referer: str = job["referer"]
+        session = job["session"]
+        referer: str = job.get("referer") or ""
+        site = job.get("site") or "pornhub"
         try:
-            _final, data = http_get_bytes(
-                session, target, referer=referer, for_media=True
-            )
+            if site == "phd3x" or job.get("no_referer"):
+                # 播放列表按站点要求不带 Referer；分片同样走该会话
+                _final, data = session.get_bytes(
+                    target, headers=session.media_headers(omit_referer=True)
+                )
+            else:
+                _final, data = http_get_bytes(
+                    session, target, referer=referer, for_media=True
+                )
         except Exception as e:
             sys.stderr.write(f"[proxy] fail {target[:120]}: {e}\n")
             return self._send_json(502, {"ok": False, "error": str(e)})
 
+        data, stripped = strip_png_wrapped_ts(data)
         ctype = _media_content_type(target)
+        if stripped or (data and data[0:1] == b"\x47" and len(data) >= 188):
+            # 剥掉 PNG 包装后必须是 mux-mp4 能吃的 MPEG-TS
+            if stripped or ctype in ("application/octet-stream", "image/png"):
+                ctype = "video/mp2t"
+        elif data[:4] in (b"\x00\x00\x00\x18", b"\x00\x00\x00\x1c") or data[4:8] in (b"ftyp", b"styp", b"moof"):
+            if ctype == "application/octet-stream":
+                ctype = "video/mp4"
         # 同源 XHR；补齐 CORS，便于 file:// 或其它端口调试
         self.send_response(200)
         self.send_header("Content-Type", ctype)
@@ -394,10 +501,10 @@ def main() -> int:
         )
 
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"[ok] Pornhub + m3u8-downloader 桥接服务")
+    print(f"[ok] Pornhub / pornhd3x + m3u8-downloader 桥接服务")
     print(f"[ok] 打开: http://{HOST}:{PORT}/")
-    print(f"[ok] 输入 Pornhub 视频页 URL，点「转码为MP4下载」")
-    print(f"[ok] 取链逻辑: download_ph_1080.py；分片+合成: 原 index.html / mux-mp4.js")
+    print(f"[ok] 输入 Pornhub 或 pornhd3x.tv 影片页 URL，点「转码为MP4下载」")
+    print(f"[ok] 取链: download_ph_1080.py / download_phd3x.py；分片+合成: 原 index.html / mux-mp4.js")
     print(f"[ok] 代理环境: {_proxy_env_summary()}")
     try:
         server.serve_forever()

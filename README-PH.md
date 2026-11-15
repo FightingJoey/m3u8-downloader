@@ -1,9 +1,11 @@
-# Pornhub 视频页 → m3u8-downloader
+# Pornhub / pornhd3x.tv 影片页 → m3u8-downloader
 
 在原版 [m3u8-downloader](https://github.com/Momo707577045/m3u8-downloader) 基础上，同时支持两种输入：
 
 1. **URL 含 `m3u8`**：当作播放列表，走原前端直接解析 / 分片下载（不调 `/api/resolve`）
-2. **URL 不含 `m3u8`**：当作 Pornhub 视频页，后端用 `download_ph_1080.py` 抓 **最高可用清晰度** 的 `index-v1-a1.m3u8`（2160/1080/720/480…），再走原分片下载 + `mux-mp4.js`；合成后的 MP4 **用原视频标题命名**
+2. **URL 不含 `m3u8`**：当作影片页，后端取 **最高可用清晰度** m3u8，再走原分片下载 + `mux-mp4.js`；合成后的 MP4 **用原视频标题命名**
+   - **Pornhub**（`view_video` / `viewkey` / embed）：`download_ph_1080.py`，优先 `index-v1-a1.m3u8`（2160/1080/720/480…）
+   - **pornhd3x.tv**（含 `wwwN.pornhd3x.tv` 的 `/movies/…` 页）：`download_phd3x.py`；该站分片常带一层 PNG 包装，`/proxy` 会剥壳后再交给 `mux-mp4.js`
 
 ## 怎么跑
 
@@ -14,25 +16,27 @@ python3 ph_server.py
 
 浏览器打开：<http://127.0.0.1:8765/>
 
-1. 粘贴链接（二选一）：
-   - 视频页：`https://cn.pornhub.com/view_video.php?viewkey=XXXX`（URL 中无 `m3u8`）
+1. 粘贴链接（任选）：
+   - Pornhub 视频页：`https://cn.pornhub.com/view_video.php?viewkey=XXXX`（URL 中无 `m3u8`）
+   - pornhd3x.tv 影片页：`https://www9.pornhd3x.tv/movies/……`
    - 或直接粘贴 `.m3u8` / 含 `m3u8` 的播放列表 URL
 2. 点 **「转码为MP4下载」**（或「原格式下载」）
-3. 视频页模式：等待「已取到 xxxP / 最高清晰度播放列表」，分片下载后合成；MP4 文件名优先用页面原标题（`og:title` 等），缺省才用 viewkey
+3. 影片页模式：等待「已取到 xxxP / 最高清晰度播放列表」，分片下载后合成；MP4 文件名优先用页面原标题（`og:title` / `movie.name` 等），缺省才用 viewkey 或影片 id
 
 ## 原理
 
 | 步骤 | 谁做 |
 |------|------|
-| 打开视频页、选最高清晰度 `*index-v1-a1.m3u8` | `download_ph_1080.py`（`http_find_1080` / `resolve_1080_media_playlist`） |
-| 把分片 URL 改写为同源 `/proxy` | `ph_server.py` |
+| 打开 Pornhub 页、选最高清晰度 `*index-v1-a1.m3u8` | `download_ph_1080.py`（`http_find_1080` / `resolve_1080_media_playlist`） |
+| 打开 pornhd3x.tv 影片页、调 `get_sources` 取最高清晰度 m3u8 | `download_phd3x.py` |
+| 把分片 URL 改写为同源 `/proxy`；pornhd3x 分片剥掉 PNG 包装 | `ph_server.py` |
 | 解析 m3u8、多线程下分片、AES、mux 成 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
 
 API：
 
-- `GET/POST /api/resolve?url=<Pornhub页>` → `{ ok, playlist_url, media_url, segment_count, title, viewkey, ... }`
-- `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie/Referer 拉 CDN 分片
-- `GET /cache/<job>_index-v1-a1.m3u8` → 改写后的播放列表
+- `GET/POST /api/resolve?url=<影片页>` → `{ ok, playlist_url, media_url, segment_count, title, quality, viewkey 或 episode_id, ... }`
+- `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie（Pornhub 另带 Referer）拉 CDN 分片；若正文是 PNG 包装的 MPEG-TS 则剥壳并以 `video/mp2t` 返回
+- `GET /cache/<job>_*.m3u8` → 改写后的播放列表
 
 ## 依赖
 
@@ -43,9 +47,10 @@ API：
 
 ## 文件
 
-- `ph_server.py` — 静态站 + 取链 API + CDN 代理
-- `download_ph_1080.py` — Pornhub 最高清晰度取链（从工作区拷入）
-- `index.html` — 按 URL 是否含 `m3u8` 分流；视频页走 `/api/resolve`；MP4 用 API 返回的 `title` 命名
+- `ph_server.py` — 静态站 + 按站点分流的取链 API + CDN 代理
+- `download_ph_1080.py` — Pornhub 最高清晰度取链
+- `download_phd3x.py` — pornhd3x.tv 影片页取链 + PNG 包装剥壳
+- `index.html` — 按 URL 是否含 `m3u8` 分流；Pornhub / pornhd3x 影片页走 `/api/resolve`；MP4 用 API 返回的 `title` 命名
 - `cache/` — 解析得到的原始/改写 m3u8（本地缓存）
 
 ## 注意
@@ -53,6 +58,10 @@ API：
 - 视频下架、无 HLS、地区限制时，`/api/resolve` 会返回错误文案；有多档清晰度时自动选最高。
 - 任务约 1 小时过期；过期后重新点解析即可。
 - 请勿把本改动推送到上游仓库，除非作者要求。
+
+## pornhd3x.tv 影片页
+
+本服务同时支持 `pornhd3x.tv` 及其 `wwwN` 子域的 `/movies/…` 影片页（例如 `https://www9.pornhd3x.tv/movies/……`）。用法与 Pornhub 相同：把影片页 URL 贴进输入框，点「转码为MP4下载」。该站目前常见只有一档 **720P**；分片可能是「小 PNG + MPEG-TS」，代理会剥壳后再给前端合成。Docker / 代理注意事项与下面各节相同，容器里访问外网仍需按原说明传入代理。
 
 ## 已修复：解析成功但全部分片失败
 

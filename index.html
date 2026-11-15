@@ -439,9 +439,9 @@
     </a>
 
     <!--文件载入-->
-    <div class="m-p-temp-url">双模式：URL 含 m3u8 → 直接解析下载；不含 m3u8 → 按 Pornhub 视频页抓取最高清晰度 m3u8（合成 MP4 用原标题命名）</div>
+    <div class="m-p-temp-url">双模式：URL 含 m3u8 → 直接解析下载；不含 m3u8 → 按 Pornhub / pornhd3x.tv 影片页抓取最高清晰度 m3u8（合成 MP4 用原标题命名）</div>
     <section class="m-p-input-container">
-      <input type="text" v-model="url" :disabled="downloading" placeholder="m3u8 链接，或 Pornhub 视频页（不含 m3u8 的 view_video / viewkey）">
+      <input type="text" v-model="url" :disabled="downloading" placeholder="m3u8 链接，或 Pornhub / pornhd3x.tv 影片页（view_video 或 /movies/…）">
 
       <!--范围查询-->
       <template v-if="!downloading || rangeDownload.isShowRange">
@@ -698,27 +698,45 @@
         return s.indexOf('view_video.php') > -1 || s.indexOf('viewkey=') > -1 || s.indexOf('/embed/') > -1
       },
 
-      // 调用本地 ph_server：download_ph_1080 取最高清晰度 index-v1-a1.m3u8，再走原有解析下载
-      resolvePornhubThen(onlyGetRange) {
+      // pornhd3x.tv / wwwN.pornhd3x.tv 影片页（/movies/…）
+      isPornhd3xPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host === 'pornhd3x.tv' || host.endsWith('.pornhd3x.tv')) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('pornhd3x.tv') > -1 && s.indexOf('/movies/') > -1
+      },
+
+      isVideoPage(u) {
+        return this.isPornhubPage(u) || this.isPornhd3xPage(u)
+      },
+
+      // 调用本地 ph_server 取链，再走原有解析下载
+      resolveVideoPageThen(onlyGetRange) {
         const pageUrl = this.url
-        this.tips = '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…'
+        const isPhd = this.isPornhd3xPage(pageUrl)
+        this.tips = isPhd
+          ? '正在从 pornhd3x.tv 解析 m3u8（download_phd3x）…'
+          : '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…'
         fetch('/api/resolve?url=' + encodeURIComponent(pageUrl))
           .then((r) => r.json().then((data) => ({ status: r.status, data })))
           .then(({ data }) => {
             if (!data || !data.ok) {
               this.tips = 'm3u8 视频在线提取工具'
-              alert((data && data.error) || 'Pornhub 解析失败')
+              alert((data && data.error) || '视频页解析失败')
               return
             }
-            console.log('[ph] resolved', data)
-            // 原视频标题优先；缺省才用 viewkey
-            const rawTitle = (data.title && String(data.title).trim()) || data.viewkey || this.title || ''
+            console.log('[resolve] ok', data)
+            // 原视频标题优先；缺省才用 viewkey / episode_id
+            const rawTitle = (data.title && String(data.title).trim()) || data.viewkey || data.episode_id || this.title || ''
             this.title = this.sanitizeFileName(rawTitle)
             if (this.pendingStreamIsMp4 !== null && this.pendingStreamIsMp4 !== undefined && !this.streamWriter) {
               this.openStreamWriter(this.pendingStreamIsMp4)
               this.pendingStreamIsMp4 = null
             }
-            const qlabel = data.quality ? (data.quality + 'P') : '最高清晰度'
+            const qlabel = data.quality ? (data.quality + 'P') : (data.quality_label || '最高清晰度')
             this.tips = '已取到 ' + qlabel + ' 播放列表（分片 ' + (data.segment_count || '?') + '）' +
               (this.title ? ('，文件名: ' + this.title) : '') + '，开始下载…'
             // 必须用绝对 URL，否则旧 applyURL 会把 /proxy 拼成错误主机导致全部分片失败
@@ -729,6 +747,11 @@
             this.tips = 'm3u8 视频在线提取工具'
             alert('无法连接本地 ph_server.py：' + err + '\n请先运行: python3 ph_server.py')
           })
+      },
+
+      // 兼容旧名
+      resolvePornhubThen(onlyGetRange) {
+        return this.resolveVideoPageThen(onlyGetRange)
       },
 
       // 解析为 mp4 下载
@@ -745,18 +768,18 @@
         }
         // 分流规则：URL 字符串是否含 "m3u8"（忽略大小写）
         // - 含 m3u8 → 直接当播放列表解析下载，绝不调用 /api/resolve
-        // - 不含 m3u8 → 当视频页：校验 Pornhub view_video/viewkey/embed 后调 /api/resolve
+        // - 不含 m3u8 → 当视频页：Pornhub 或 pornhd3x.tv 影片页，调 /api/resolve
         const urlLower = String(this.url).toLowerCase()
         if (urlLower.indexOf('m3u8') === -1) {
-          if (!this.isPornhubPage(this.url)) {
-            alert('请输入 m3u8 链接，或 Pornhub 视频页链接（view_video.php?viewkey=…）')
+          if (!this.isVideoPage(this.url)) {
+            alert('请输入 m3u8 链接，或 Pornhub / pornhd3x.tv 影片页链接')
             return
           }
           if (this.downloading) {
             alert('资源下载中，请稍后')
             return
           }
-          this.resolvePornhubThen(onlyGetRange)
+          this.resolveVideoPageThen(onlyGetRange)
           return
         }
         if (this.downloading) {
