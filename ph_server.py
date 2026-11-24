@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 本地桥接服务：在 m3u8-downloader 页面里输入视频页 URL，
-后端按站点取最高可用清晰度 m3u8，把分片 URL 改写为同源 /proxy，
-前端仍用原有 JS 分片下载 + mux-mp4 合成。
+后端按站点取最高可用清晰度 m3u8/MP4，把分片 URL 改写为同源 /proxy，
+前端仍用原有 JS 分片下载 + mux-mp4 合成（或直接下载 MP4）。
 
 支持:
   - Pornhub 视频页（download_ph_1080.py）
   - pornhd3x.tv / wwwN.pornhd3x.tv 影片页（download_phd3x.py；代理会剥 PNG 包装的 TS）
+  - freepornvideos.xxx 视频页（download_fpv.py；原生 MP4 渐进式下载）
 
 用法:
   python3 ph_server.py
   # 浏览器打开 http://127.0.0.1:8765/
-  # 输入 Pornhub view_video 或 pornhd3x.tv /movies/... 链接
+  # 输入 Pornhub / pornhd3x.tv / freepornvideos.xxx 视频页链接
 """
 
 from __future__ import annotations
@@ -51,6 +52,10 @@ from download_phd3x import (  # noqa: E402
     is_phd3x_page,
     resolve_phd3x,
     strip_png_wrapped_ts,
+)
+from download_fpv import (  # noqa: E402
+    is_fpv_page,
+    resolve_fpv,
 )
 
 HOST = os.environ.get("PH_HOST", "0.0.0.0")
@@ -299,17 +304,85 @@ def resolve_phd3x_job(page_url: str) -> dict:
     }
 
 
+def resolve_fpv_job(page_url: str) -> dict:
+    """freepornvideos：直接 MP4 下载，无需 m3u8 改写（返回 mp4_url 供前端直接下载）。"""
+    _purge_old_jobs()
+    got = resolve_fpv(page_url)
+    if not got.get("ok"):
+        return {
+            "ok": False,
+            "error": got.get("error") or "freepornvideos 解析失败",
+            "notes": got.get("notes") or [],
+            "title": got.get("title"),
+            "video_id": got.get("video_id"),
+            "quality": got.get("quality"),
+        }
+
+    job_id = uuid.uuid4().hex[:12]
+    mp4_url = got["mp4_url"]
+    title = got.get("title")
+    quality = got.get("quality")
+    actual_w = got.get("actual_width") or 0
+    actual_h = got.get("actual_height") or 0
+
+    (CACHE / f"{job_id}_meta.json").write_text(
+        json.dumps(
+            {
+                "site": "fpv",
+                "page_url": got.get("page_url") or page_url,
+                "mp4_url": mp4_url,
+                "video_id": got.get("video_id"),
+                "title": title,
+                "quality": quality,
+                "quality_label": got.get("quality_label"),
+                "actual_width": actual_w,
+                "actual_height": actual_h,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "session": got["session"],
+            "referer": got.get("page_url") or page_url,
+            "site": "fpv",
+            "mp4_url": mp4_url,
+            "created": time.time(),
+            "title": title,
+        }
+
+    # 返回格式：前端检测到 is_mp4=True 时走直接下载流程
+    return {
+        "ok": True,
+        "is_mp4": True,
+        "job_id": job_id,
+        "mp4_url": _proxy_path(mp4_url, job_id),
+        "quality": quality or None,
+        "quality_label": got.get("quality_label"),
+        "actual_resolution": f"{actual_w}x{actual_h}" if actual_w and actual_h else None,
+        "video_id": got.get("video_id"),
+        "title": title,
+        "notes": got.get("notes") or [],
+        "site": "fpv",
+    }
+
+
 def resolve_page(page_url: str) -> dict:
     page_url = (page_url or "").strip()
     if not page_url.startswith("http"):
         return {"ok": False, "error": "URL 必须以 http/https 开头"}
+    if is_fpv_page(page_url):
+        return resolve_fpv_job(page_url)
     if is_phd3x_page(page_url):
         return resolve_phd3x_job(page_url)
     if _is_ph_page(page_url):
         return resolve_ph(page_url)
     return {
         "ok": False,
-        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）或 pornhd3x.tv 影片页（/movies/…）",
+        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）、pornhd3x.tv 影片页（/movies/…）或 freepornvideos.xxx 视频页（/videos/…）",
     }
 
 
@@ -424,6 +497,69 @@ class Handler(SimpleHTTPRequestHandler):
         session = job["session"]
         referer: str = job.get("referer") or ""
         site = job.get("site") or "pornhub"
+
+        # freepornvideos: 支持 Range 请求（流式下载 / 断点续传）
+        if site == "fpv":
+            range_header = self.headers.get("Range")
+            try:
+                if range_header and range_header.startswith("bytes="):
+                    # Range 请求：解析 bytes=start-end
+                    parts = range_header[6:].split("-", 1)
+                    start = int(parts[0]) if parts[0] else 0
+                    end = int(parts[1]) if len(parts) > 1 and parts[1] else None
+                    # fpv session 支持 Range
+                    if end is None:
+                        # 请求到文件末尾：先 HEAD 获取总大小
+                        # 简化：直接用 get_bytes 拉整个（后续可优化为真 Range）
+                        _final, data = session.get_bytes(
+                            target, headers=session.media_headers(referer=referer)
+                        )
+                        if start > 0:
+                            data = data[start:]
+                        # 返回 206 Partial Content
+                        self.send_response(206)
+                        self.send_header("Content-Type", "video/mp4")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.send_header("Content-Range", f"bytes {start}-{start+len(data)-1}/*")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Type")
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        self.wfile.write(data)
+                    else:
+                        # 指定 Range
+                        data = session.get_range_bytes(target, start, end, referer=referer)
+                        self.send_response(206)
+                        self.send_header("Content-Type", "video/mp4")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.send_header("Content-Range", f"bytes {start}-{end}/*")
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Type")
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        self.wfile.write(data)
+                else:
+                    # 完整请求
+                    _final, data = session.get_bytes(
+                        target, headers=session.media_headers(referer=referer)
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+            except Exception as e:
+                sys.stderr.write(f"[proxy] fpv fail {target[:120]}: {e}\n")
+                return self._send_json(502, {"ok": False, "error": str(e)})
+            return
+
+        # pornhub / phd3x: 现有逻辑
         try:
             if site == "phd3x" or job.get("no_referer"):
                 # 播放列表按站点要求不带 Referer；分片同样走该会话
@@ -501,10 +637,10 @@ def main() -> int:
         )
 
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"[ok] Pornhub / pornhd3x + m3u8-downloader 桥接服务")
+    print(f"[ok] Pornhub / pornhd3x / freepornvideos + m3u8-downloader 桥接服务")
     print(f"[ok] 打开: http://{HOST}:{PORT}/")
-    print(f"[ok] 输入 Pornhub 或 pornhd3x.tv 影片页 URL，点「转码为MP4下载」")
-    print(f"[ok] 取链: download_ph_1080.py / download_phd3x.py；分片+合成: 原 index.html / mux-mp4.js")
+    print(f"[ok] 输入 Pornhub / pornhd3x.tv / freepornvideos.xxx 视频页 URL，点「转码为MP4下载」")
+    print(f"[ok] 取链: download_ph_1080.py / download_phd3x.py / download_fpv.py；分片+合成: index.html / mux-mp4.js")
     print(f"[ok] 代理环境: {_proxy_env_summary()}")
     try:
         server.serve_forever()
