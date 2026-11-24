@@ -485,20 +485,38 @@ class Handler(SimpleHTTPRequestHandler):
         if not job_id or not target:
             return self._send_json(400, {"ok": False, "error": "缺少 job 或 u"})
         if not target.startswith("http"):
-            return self._send_json(400, {"ok": False, "error": "非法目标 URL"})
+            return self._send_json(400, {"ok": False, "error": "非法目标 URL（必须 http/https）"})
+
+        # 验证目标 URL 主机名（防 SSRF）
+        try:
+            from download_fpv import _is_safe_hostname
+            parsed_target = urlparse(target)
+            target_host = parsed_target.hostname or ""
+            # fpvcdn.com / phncdn.com / pornhd3x CDN 等已知合法
+            allowed_cdn = ("fpvcdn.com", "phncdn.com", "pornhd3x.tv")
+            is_allowed = any(
+                target_host == cdn or target_host.endswith("." + cdn)
+                for cdn in allowed_cdn
+            ) or _is_safe_hostname(target_host)
+            if not is_allowed:
+                sys.stderr.write(f"[proxy] SSRF blocked: {target_host}\n")
+                return self._send_json(403, {"ok": False, "error": f"目标主机名不允许: {target_host}"})
+        except Exception as e:
+            sys.stderr.write(f"[proxy] hostname validation error: {e}\n")
+            return self._send_json(500, {"ok": False, "error": f"主机名验证失败: {e}"})
 
         with _JOBS_LOCK:
             job = _JOBS.get(job_id)
         if not job:
             return self._send_json(
-                410, {"ok": False, "error": "任务已过期，请重新解析视频页链接"}
+                410, {"ok": False, "error": "任务已过期（约 1 小时），请重新解析视频页链接"}
             )
 
         session = job["session"]
         referer: str = job.get("referer") or ""
         site = job.get("site") or "pornhub"
 
-        # freepornvideos: 支持 Range 请求（流式下载 / 断点续传）
+        # freepornvideos: 支持 Range 请求（流式下载 / 断点续传）+ Cookie 保留
         if site == "fpv":
             range_header = self.headers.get("Range")
             try:

@@ -151,11 +151,28 @@ class TestFpvMP4Probe(unittest.TestCase):
         box = struct.pack(">I", size) + b"tkhd" + payload
         return box
 
+    def _make_hdlr_box(self, handler_type: bytes = b"vide") -> bytes:
+        """构造 hdlr (handler) box 以标识轨道类型。"""
+        payload = bytearray()
+        payload.append(0)  # version
+        payload.extend(b"\x00\x00\x00")  # flags
+        payload.extend(b"\x00\x00\x00\x00")  # pre_defined
+        payload.extend(handler_type)  # handler_type ('vide' for video)
+        payload.extend(b"\x00" * 12)  # reserved
+        payload.extend(b"VideoHandler\x00")  # name
+        
+        size = 8 + len(payload)
+        return struct.pack(">I", size) + b"hdlr" + payload
+
     def _make_moov_trak(self, width: int, height: int) -> bytes:
-        """moov > trak > tkhd。"""
+        """moov > trak > (hdlr + tkhd)。"""
+        hdlr = self._make_hdlr_box(b"vide")
         tkhd = self._make_tkhd_box(width, height)
-        trak_size = 8 + len(tkhd)
-        trak = struct.pack(">I", trak_size) + b"trak" + tkhd
+        
+        trak_payload = hdlr + tkhd
+        trak_size = 8 + len(trak_payload)
+        trak = struct.pack(">I", trak_size) + b"trak" + trak_payload
+        
         moov_size = 8 + len(trak)
         moov = struct.pack(">I", moov_size) + b"moov" + trak
         return moov

@@ -46,19 +46,71 @@ FPV_COOKIE_PAIRS = [
 ]
 
 
+def _is_safe_hostname(hostname: str) -> bool:
+    """验证主机名安全性：拒绝私有/回环/链路本地地址。"""
+    if not hostname:
+        return False
+    
+    hostname = hostname.lower()
+    
+    # 拒绝回环
+    if hostname in ("localhost", "localhost.localdomain"):
+        return False
+    
+    # 检查 IP 地址
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(hostname)
+        # 拒绝私有、回环、链路本地、多播
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            return False
+    except ValueError:
+        # 非 IP，检查域名
+        pass
+    
+    # 仅允许 freepornvideos.xxx 和已知 CDN
+    allowed_domains = (
+        "freepornvideos.xxx",
+        "www.freepornvideos.xxx",
+        "fpvcdn.com",
+    )
+    
+    # 完全匹配或子域匹配
+    if hostname in allowed_domains:
+        return True
+    
+    for domain in allowed_domains:
+        if hostname.endswith("." + domain):
+            return True
+    
+    return False
+
+
 def is_fpv_page(url: str) -> bool:
-    """freepornvideos.xxx 视频页检测（/videos/数字ID/）。"""
+    """freepornvideos.xxx 视频页检测（/videos/数字ID/）+ 主机名验证。"""
     if not url:
         return False
     try:
         p = urlparse(url.strip())
     except Exception:
-        return "freepornvideos." in url.lower()
+        return False
+    
+    # 必须是 https
+    if p.scheme not in ("https", "http"):
+        return False
+    
     host = (p.hostname or "").lower()
-    if "freepornvideos." in host:
-        return True
+    if not host:
+        return False
+    
+    # 严格主机名检查
+    if host not in ("freepornvideos.xxx", "www.freepornvideos.xxx"):
+        # 允许子域如 en.freepornvideos.xxx
+        if not host.endswith(".freepornvideos.xxx"):
+            return False
+    
     path = (p.path or "").lower()
-    return "/videos/" in path and "freepornvideos" in url.lower()
+    return "/videos/" in path
 
 
 def site_origin(url: str) -> str:
@@ -195,12 +247,14 @@ def label_height(label: Any) -> int:
     return int(m.group(1)) if m else 0
 
 
-def probe_mp4_dimensions(data: bytes, max_scan: int = 512 * 1024) -> tuple[int, int] | None:
+def probe_mp4_dimensions(data: bytes, max_scan: int = 4 * 1024 * 1024) -> tuple[int, int] | None:
     """探测 MP4 前若干字节中的真实 width x height（从 moov/trak/tkhd）。
 
     MP4 box 结构：4B size + 4B type + payload。
     tkhd (track header): version(1) + flags(3) + ... + matrix(36) + width(4) + height(4).
-    仅扫描头部有限字节以避免下载整个文件。
+    
+    max_scan 默认 4MB（支持大 moov box；用户样本需约 3.2MB）。
+    仅扫描视频轨道（handler_type='vide'），忽略音频/字幕轨。
     """
     if len(data) < 32:
         return None
@@ -211,45 +265,88 @@ def probe_mp4_dimensions(data: bytes, max_scan: int = 512 * 1024) -> tuple[int, 
         if offset + 4 > len(data):
             return 0
         return struct.unpack(">I", data[offset : offset + 4])[0]
+    
+    def read_u64(offset: int) -> int:
+        if offset + 8 > len(data):
+            return 0
+        return struct.unpack(">Q", data[offset : offset + 8])[0]
 
-    def scan_boxes(start: int, end: int) -> tuple[int, int] | None:
-        """递归扫描 box 树。"""
+    def scan_boxes(start: int, end: int, in_video_track: bool = False) -> tuple[int, int] | None:
+        """递归扫描 box 树，优先视频轨道。"""
         pos = start
+        is_video_track = in_video_track
+        
         while pos + 8 <= end:
             size = read_u32(pos)
-            if size == 0:
-                break
-            if size < 8:
-                break
-            typ = data[pos + 4 : pos + 8]
-            payload_start = pos + 8
-            box_end = pos + size
-            if box_end > end:
-                break
-
-            # 找到 tkhd box
-            if typ == b"tkhd":
-                if payload_start >= len(data):
+            if size == 1:
+                # 64位大小
+                if pos + 16 > len(data):
                     break
-                # tkhd 结构 (简化 version==0):
-                # version(1) + flags(3) = 4
-                # created(4) + modified(4) + track_id(4) + reserved(4) + duration(4) = 20
-                # reserved(8) + layer(2) + alternate(2) + volume(2) + reserved(2) = 16
-                # matrix(36)
-                # width(4) + height(4)
-                # 总偏移：4 + 20 + 16 + 36 = 76 bytes 后为 width/height
-                offset_w = payload_start + 76
+                size = read_u64(pos + 8)
+                payload_start = pos + 16
+            elif size == 0:
+                # 延伸到文件末尾
+                break
+            elif size < 8:
+                # 非法大小
+                break
+            else:
+                payload_start = pos + 8
+            
+            typ = data[pos + 4 : pos + 8]
+            box_end = pos + size
+            if box_end > end or box_end > len(data):
+                # box 超出可用数据，可能部分 moov
+                # 尝试扫描已有部分
+                box_end = min(end, len(data))
+
+            # 检查 hdlr (handler) box 判断是否视频轨
+            if typ == b"hdlr" and payload_start + 12 <= len(data):
+                # hdlr: version(1) + flags(3) + pre_defined(4) + handler_type(4)
+                handler_offset = payload_start + 8
+                if handler_offset + 4 <= len(data):
+                    handler_type = data[handler_offset : handler_offset + 4]
+                    is_video_track = (handler_type == b"vide")
+
+            # 找到 tkhd box（仅在视频轨道内）
+            if typ == b"tkhd" and payload_start < len(data):
+                # 检查 version
+                if payload_start >= len(data):
+                    pos = box_end
+                    continue
+                    
+                version = data[payload_start]
+                
+                if version == 0:
+                    # version 0: 32位时间
+                    # version(1) + flags(3) + created(4) + modified(4) + track_id(4) + 
+                    # reserved(4) + duration(4) + reserved(8) + layer(2) + alternate(2) + 
+                    # volume(2) + reserved(2) + matrix(36) + width(4) + height(4)
+                    offset_w = payload_start + 76
+                elif version == 1:
+                    # version 1: 64位时间
+                    # version(1) + flags(3) + created(8) + modified(8) + track_id(4) + 
+                    # reserved(4) + duration(8) + reserved(8) + layer(2) + alternate(2) + 
+                    # volume(2) + reserved(2) + matrix(36) + width(4) + height(4)
+                    offset_w = payload_start + 88
+                else:
+                    pos = box_end
+                    continue
+                
                 if offset_w + 8 <= len(data):
                     w_fp = read_u32(offset_w)
                     h_fp = read_u32(offset_w + 4)
                     w = w_fp >> 16
                     h = h_fp >> 16
                     if w > 0 and h > 0 and w <= 8192 and h <= 8192:
-                        return w, h
+                        # 仅当在视频轨道或未知轨道时返回（优先视频）
+                        # 若已知非视频轨道（音频），继续查找
+                        if is_video_track or in_video_track:
+                            return w, h
 
             # 递归扫描容器 box
             if typ in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):
-                result = scan_boxes(payload_start, box_end)
+                result = scan_boxes(payload_start, box_end, is_video_track)
                 if result:
                     return result
 
@@ -270,8 +367,9 @@ def pick_best_source(
     策略：
     1) 过滤出 MP4 候选（.mp4 / type=video/mp4）
     2) 按标签分辨率降序排列
-    3) 对每个候选，Range 请求头部（0-524287，512KB）探测实际尺寸
+    3) 对每个候选，Range 请求头部（0-4MB）探测实际尺寸
     4) 返回实际分辨率最高的源
+    5) 若无法探测，标注 (0, 0) 并按标签排序（LABEL_FALLBACK，非实际尺寸）
     """
     candidates: list[tuple[int, str, str]] = []
     for s in sources:
@@ -295,33 +393,48 @@ def pick_best_source(
     candidates.sort(key=lambda x: x[0], reverse=True)
 
     best: tuple[str, int, str, int, int] | None = None  # (url, label_h, label, w, h)
+    probed_any = False
+    
     for label_h, url, label in candidates:
         # 扩展为绝对 URL
         if not url.startswith("http"):
             url = urljoin(page_url, url)
-        # 探测实际尺寸
+        
+        # 验证 URL 安全性
+        parsed = urlparse(url)
+        if not _is_safe_hostname(parsed.hostname or ""):
+            print(f"[warn] fpv 源 label={label} 主机名不安全: {parsed.hostname}")
+            continue
+        
+        # 探测实际尺寸（扩展到 4MB 以支持大 moov）
         try:
-            head = session.get_range_bytes(url, 0, 512 * 1024 - 1, referer=page_url)
+            head = session.get_range_bytes(url, 0, 4 * 1024 * 1024 - 1, referer=page_url)
             dims = probe_mp4_dimensions(head)
             if dims:
                 w, h = dims
+                probed_any = True
                 print(
                     f"[info] fpv 源 label={label} ({label_h}p) 实际 {w}x{h}"
                 )
                 if best is None or (h * w) > (best[3] * best[4]):
                     best = (url, label_h, label, w, h)
             else:
-                print(f"[warn] fpv 源 label={label} 无法探测尺寸")
-                # 无法探测时退回标签高度
+                print(f"[warn] fpv 源 label={label} 无法探测尺寸（moov 不完整或格式异常）")
+                # 无法探测：标注 (0, 0) 表示 LABEL_FALLBACK
                 if best is None:
-                    best = (url, label_h, label, 0, label_h or 0)
+                    best = (url, label_h, label, 0, 0)
         except Exception as e:
             print(f"[warn] fpv 源 label={label} Range 探测失败: {e}")
             if best is None:
-                best = (url, label_h, label, 0, label_h or 0)
+                best = (url, label_h, label, 0, 0)
 
     if not best:
-        raise ValueError("所有源均无法探测")
+        raise ValueError("所有源均被拒绝（主机名不安全）")
+    
+    # 警告：若所有源都无法探测，仅按标签排序（不准确）
+    if not probed_any and best[3] == 0 and best[4] == 0:
+        print(f"[warn] fpv 所有源无法探测实际尺寸，按标签排序（可能不准确）")
+    
     return best
 
 
@@ -398,15 +511,29 @@ class FpvSession:
         *,
         headers: dict[str, str] | None = None,
         timeout: int = 60,
+        validate_redirect: bool = True,
     ) -> tuple[str, bytes]:
+        """获取字节内容，验证初始和重定向目标。"""
+        # 验证初始 URL
+        parsed = urlparse(url)
+        if not _is_safe_hostname(parsed.hostname or ""):
+            raise ValueError(f"Unsafe hostname: {parsed.hostname}")
+        
         hdrs = dict(headers or self.media_headers())
         req = urllib.request.Request(url, headers=hdrs)
         try:
             with self.opener.open(req, timeout=timeout) as resp:
+                # 验证最终 URL（重定向后）
+                final_url = resp.geturl()
+                if validate_redirect and final_url != url:
+                    final_parsed = urlparse(final_url)
+                    if not _is_safe_hostname(final_parsed.hostname or ""):
+                        raise ValueError(f"Unsafe redirect to: {final_parsed.hostname}")
+                
                 data = resp.read()
                 enc = (resp.headers.get("Content-Encoding") or "").lower()
                 data = maybe_decompress(data, enc)
-                return resp.geturl(), data
+                return final_url, data
         except urllib.error.HTTPError as e:
             try:
                 _ = e.read()
@@ -433,12 +560,24 @@ class FpvSession:
         referer: str | None = None,
         timeout: int = 30,
     ) -> bytes:
-        """Range 请求指定字节范围（用于探测或分块下载）。"""
+        """Range 请求指定字节范围（用于探测或分块下载）+ 主机名验证。"""
+        # 验证 URL 安全性
+        parsed = urlparse(url)
+        if not _is_safe_hostname(parsed.hostname or ""):
+            raise ValueError(f"Unsafe hostname for range request: {parsed.hostname}")
+        
         hdrs = self.media_headers(referer=referer)
         hdrs["Range"] = f"bytes={start}-{end}"
         req = urllib.request.Request(url, headers=hdrs)
         try:
             with self.opener.open(req, timeout=timeout) as resp:
+                # 验证重定向
+                final_url = resp.geturl()
+                if final_url != url:
+                    final_parsed = urlparse(final_url)
+                    if not _is_safe_hostname(final_parsed.hostname or ""):
+                        raise ValueError(f"Unsafe redirect in range request: {final_parsed.hostname}")
+                
                 data = resp.read()
                 # Range 响应一般不压缩
                 return data
