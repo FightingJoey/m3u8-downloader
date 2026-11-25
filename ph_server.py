@@ -9,11 +9,12 @@
   - Pornhub 视频页（download_ph_1080.py）
   - pornhd3x.tv / wwwN.pornhd3x.tv 影片页（download_phd3x.py；代理会剥 PNG 包装的 TS）
   - freepornvideos.xxx 视频页（download_fpv.py；原生 MP4 渐进式下载）
+  - whoreshub.com 视频页（download_wh.py；KVS kt_player + 原生 MP4 渐进式下载）
 
 用法:
   python3 ph_server.py
   # 浏览器打开 http://127.0.0.1:8765/
-  # 输入 Pornhub / pornhd3x.tv / freepornvideos.xxx 视频页链接
+  # 输入 Pornhub / pornhd3x.tv / freepornvideos.xxx / whoreshub.com 视频页链接
 """
 
 from __future__ import annotations
@@ -56,6 +57,10 @@ from download_phd3x import (  # noqa: E402
 from download_fpv import (  # noqa: E402
     is_fpv_page,
     resolve_fpv,
+)
+from download_wh import (  # noqa: E402
+    is_wh_page,
+    resolve_wh,
 )
 
 HOST = os.environ.get("PH_HOST", "0.0.0.0")
@@ -370,10 +375,76 @@ def resolve_fpv_job(page_url: str) -> dict:
     }
 
 
+def resolve_wh_job(page_url: str) -> dict:
+    """whoreshub：直接 MP4 下载（KVS kt_player + flashvars），无需 m3u8 改写。"""
+    _purge_old_jobs()
+    got = resolve_wh(page_url)
+    if not got.get("ok"):
+        return {
+            "ok": False,
+            "error": got.get("error") or "whoreshub 解析失败",
+            "notes": got.get("notes") or [],
+            "title": got.get("title"),
+            "video_id": got.get("video_id"),
+            "quality": got.get("quality"),
+        }
+
+    job_id = uuid.uuid4().hex[:12]
+    mp4_url = got["mp4_url"]
+    title = got.get("title")
+    quality = got.get("quality")
+    actual_w = got.get("actual_width") or 0
+    actual_h = got.get("actual_height") or 0
+
+    (CACHE / f"{job_id}_meta.json").write_text(
+        json.dumps(
+            {
+                "site": "wh",
+                "page_url": got.get("page_url") or page_url,
+                "mp4_url": mp4_url,
+                "video_id": got.get("video_id"),
+                "title": title,
+                "quality": quality,
+                "quality_label": got.get("quality_label"),
+                "actual_width": actual_w,
+                "actual_height": actual_h,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "session": got["session"],
+            "referer": got.get("page_url") or page_url,
+            "site": "wh",
+            "mp4_url": mp4_url,
+            "created": time.time(),
+            "title": title,
+        }
+
+    # 返回格式：前端检测到 is_mp4=True 时走直接下载流程
+    return {
+        "ok": True,
+        "is_mp4": True,
+        "job_id": job_id,
+        "mp4_url": _proxy_path(mp4_url, job_id),
+        "quality": quality or None,
+        "quality_label": got.get("quality_label"),
+        "actual_resolution": f"{actual_w}x{actual_h}" if actual_w and actual_h else None,
+        "video_id": got.get("video_id"),
+        "title": title,
+    }
+
+
 def resolve_page(page_url: str) -> dict:
     page_url = (page_url or "").strip()
     if not page_url.startswith("http"):
         return {"ok": False, "error": "URL 必须以 http/https 开头"}
+    if is_wh_page(page_url):
+        return resolve_wh_job(page_url)
     if is_fpv_page(page_url):
         return resolve_fpv_job(page_url)
     if is_phd3x_page(page_url):
@@ -382,7 +453,7 @@ def resolve_page(page_url: str) -> dict:
         return resolve_ph(page_url)
     return {
         "ok": False,
-        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）、pornhd3x.tv 影片页（/movies/…）或 freepornvideos.xxx 视频页（/videos/…）",
+        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）、pornhd3x.tv 影片页（/movies/…）、freepornvideos.xxx 视频页（/videos/…）或 whoreshub.com 视频页（/videos/…）",
     }
 
 
@@ -492,8 +563,8 @@ class Handler(SimpleHTTPRequestHandler):
             from download_fpv import _is_safe_hostname
             parsed_target = urlparse(target)
             target_host = parsed_target.hostname or ""
-            # fpvcdn.com / phncdn.com / pornhd3x CDN 等已知合法
-            allowed_cdn = ("fpvcdn.com", "phncdn.com", "pornhd3x.tv")
+            # fpvcdn.com / phncdn.com / pornhd3x / cdntrex CDN 等已知合法
+            allowed_cdn = ("fpvcdn.com", "phncdn.com", "pornhd3x.tv", "cdntrex.com")
             is_allowed = any(
                 target_host == cdn or target_host.endswith("." + cdn)
                 for cdn in allowed_cdn
