@@ -53,12 +53,14 @@ WAIT_SECONDS = 45
 # 略降默认并发；主修复仍是请求头 / Cookie，不是并发
 SEG_WORKERS = 4
 # 与当前桌面 Chrome 对齐（页面与 CDN 共用）
+# Chrome 140+ UA strings get Cloudflare 502 (error code: 502) from
+# freepornvideos.xxx when sent by urllib. Chrome 131 is accepted.
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/142.0.0.0 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
-SEC_CH_UA = '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"'
+SEC_CH_UA = '"Chromium";v="131", "Google Chrome";v="131", "Not_A Brand";v="99"'
 AGE_COOKIE_PAIRS = [
     ("accessAgeDisclaimerPH", "1"),
     ("accessAgeDisclaimerUK", "1"),

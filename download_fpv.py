@@ -40,10 +40,9 @@ from download_ph_1080 import (
     sanitize_proxy_env,
 )
 
-# 该站首页 Cookie
-FPV_COOKIE_PAIRS = [
-    ("kt_ips", "1"),
-]
+# 不要预设 kt_ips。该 Cookie 由页面 Set-Cookie 下发且含客户端 IP；
+# 写死 "1" 会把错误的 IP 绑定带给后续 get_file / CDN 请求。
+FPV_COOKIE_PAIRS: list[tuple[str, str]] = []
 
 
 def _is_safe_hostname(hostname: str) -> bool:
@@ -179,10 +178,38 @@ def extract_title(html: str) -> str | None:
 def extract_sources_from_html(html: str) -> list[dict[str, Any]]:
     """从 HTML 中提取 Video.js sources（progressiveMP4 配置）。
 
+    优先解析 <source src type=video/mp4 label>，再回退到 JS sources 对象。
     返回 [{ label, file, ... }, ...]
     """
     sources: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
+
+    for m in re.finditer(r"<source\s+([^>]+)>", html, re.I):
+        attrs = m.group(1)
+        src_match = re.search(r"""src=["']([^"']+)["']""", attrs, re.I)
+        if not src_match:
+            continue
+        src = src_match.group(1).strip()
+        if not src or src in seen_urls:
+            continue
+        type_match = re.search(r"""type=["']([^"']+)["']""", attrs, re.I)
+        media_type = type_match.group(1) if type_match else ""
+        if "video/mp4" not in media_type.lower() and ".mp4" not in src.lower():
+            continue
+        label_match = re.search(r"""label=["']([^"']+)["']""", attrs, re.I)
+        label = label_match.group(1) if label_match else ""
+        selected_match = re.search(
+            r"""selected=["']?(true|True|TRUE)["']?""", attrs, re.I
+        )
+        sources.append({
+            "file": src,
+            "label": label,
+            "selected": bool(selected_match),
+            "type": media_type or "video/mp4",
+        })
+        seen_urls.add(src)
+    if sources:
+        return sources
 
     # 1) 尝试 var playerOptions / sources = [...] JSON
     patterns = [
