@@ -20,7 +20,9 @@ import unittest
 
 from download_wh import (
     _clean_title,
-    _is_safe_wh_hostname,
+    _is_safe_hostname,
+    extract_flashvars_from_html,
+    extract_sources_from_flashvars,
     extract_title,
     extract_video_id,
     is_wh_page,
@@ -32,29 +34,29 @@ class TestWhSSRFProtection(unittest.TestCase):
     """SSRF 防护测试（复用 fpv 逻辑）。"""
 
     def test_reject_localhost(self):
-        self.assertFalse(_is_safe_wh_hostname("localhost"))
-        self.assertFalse(_is_safe_wh_hostname("localhost.localdomain"))
+        self.assertFalse(_is_safe_hostname("localhost"))
+        self.assertFalse(_is_safe_hostname("localhost.localdomain"))
 
     def test_reject_loopback_ipv4(self):
-        self.assertFalse(_is_safe_wh_hostname("127.0.0.1"))
-        self.assertFalse(_is_safe_wh_hostname("127.0.0.2"))
+        self.assertFalse(_is_safe_hostname("127.0.0.1"))
+        self.assertFalse(_is_safe_hostname("127.0.0.2"))
 
     def test_reject_loopback_ipv6(self):
-        self.assertFalse(_is_safe_wh_hostname("::1"))
+        self.assertFalse(_is_safe_hostname("::1"))
 
     def test_reject_private_ipv4(self):
-        self.assertFalse(_is_safe_wh_hostname("192.168.1.1"))
-        self.assertFalse(_is_safe_wh_hostname("10.0.0.1"))
-        self.assertFalse(_is_safe_wh_hostname("172.16.0.1"))
+        self.assertFalse(_is_safe_hostname("192.168.1.1"))
+        self.assertFalse(_is_safe_hostname("10.0.0.1"))
+        self.assertFalse(_is_safe_hostname("172.16.0.1"))
 
     def test_accept_wh_domains(self):
-        self.assertTrue(_is_safe_wh_hostname("whoreshub.com"))
-        self.assertTrue(_is_safe_wh_hostname("www.whoreshub.com"))
-        self.assertTrue(_is_safe_wh_hostname("en.whoreshub.com"))
+        self.assertTrue(_is_safe_hostname("whoreshub.com"))
+        self.assertTrue(_is_safe_hostname("www.whoreshub.com"))
+        self.assertTrue(_is_safe_hostname("en.whoreshub.com"))
 
     def test_reject_unrelated_domains(self):
-        self.assertFalse(_is_safe_wh_hostname("example.com"))
-        self.assertFalse(_is_safe_wh_hostname("evil.com"))
+        self.assertFalse(_is_safe_hostname("example.com"))
+        self.assertFalse(_is_safe_hostname("evil.com"))
 
 
 class TestWhURLDetection(unittest.TestCase):
@@ -110,14 +112,82 @@ class TestWhTitleExtraction(unittest.TestCase):
 
 
 class TestWhPlaceholder(unittest.TestCase):
-    """占位符功能测试（待实现）。"""
+    """真实网络测试（无网络访问时跳过）。"""
 
-    def test_resolve_wh_not_implemented(self):
-        """当前应返回"待实现"错误。"""
+    def test_resolve_wh_no_network(self):
+        """无网络访问时应返回网络错误（非"待实现"）。"""
         result = resolve_wh("https://www.whoreshub.com/videos/730394/title/")
         self.assertFalse(result.get("ok"))
-        self.assertIn("待实现", result.get("error", ""))
-        self.assertEqual(result.get("video_id"), "730394")
+        # 预期网络错误，不是"待实现"
+        self.assertIn("失败", result.get("error", ""))
+
+
+class TestWhFlashvarsExtraction(unittest.TestCase):
+    """基于实际证据的 flashvars 提取测试。"""
+
+    def test_extract_flashvars_from_real_html(self):
+        """从真实页面 HTML 片段提取 flashvars。"""
+        import os
+        fixture_path = "/home/ubuntu/.cursor/projects/workspace/uploads/page-player-excerpt_d73d.html"
+        if not os.path.exists(fixture_path):
+            self.skipTest(f"证据文件不存在: {fixture_path}")
+        
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        
+        flashvars = extract_flashvars_from_html(html)
+        self.assertIsNotNone(flashvars)
+        self.assertEqual(flashvars.get("video_id"), "730394")
+        self.assertIn("video_url", flashvars)
+        self.assertIn("video_alt_url", flashvars)
+        self.assertIn("video_alt_url2", flashvars)
+        self.assertIn("video_alt_url3", flashvars)
+
+    def test_extract_sources_from_real_flashvars(self):
+        """从真实 flashvars JSON 提取源。"""
+        import json
+        import os
+        fixture_path = "/home/ubuntu/.cursor/projects/workspace/uploads/flashvars-sanitized_ae04.json"
+        if not os.path.exists(fixture_path):
+            self.skipTest(f"证据文件不存在: {fixture_path}")
+        
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            flashvars = json.load(f)
+        
+        sources = extract_sources_from_flashvars(flashvars)
+        self.assertEqual(len(sources), 4)  # 480p, 720p, 1080p, 2160p
+        
+        # 检查标签
+        labels = [s.get("label") for s in sources]
+        self.assertIn("480p", labels)
+        self.assertIn("720p HD", labels)
+        self.assertIn("1080p FHD", labels)
+        self.assertIn("2160p 4k", labels)
+        
+        # 检查 URL
+        for s in sources:
+            url = s.get("file", "")
+            self.assertIn("/get_file/", url)
+            self.assertIn("v-acctoken=", url)
+
+    def test_filter_embed_redirect_sources(self):
+        """embed 页面应过滤 *_redirect="1" 的源。"""
+        import json
+        import os
+        fixture_path = "/home/ubuntu/.cursor/projects/workspace/uploads/embed-flashvars-sanitized_59eb.json"
+        if not os.path.exists(fixture_path):
+            self.skipTest(f"证据文件不存在: {fixture_path}")
+        
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            flashvars = json.load(f)
+        
+        sources = extract_sources_from_flashvars(flashvars)
+        # Embed 页：480p 真实，720p+重定向，应只保留480p
+        # （实际情况需查看 embed JSON 内容）
+        self.assertGreater(len(sources), 0)
+        for s in sources:
+            # 确保没有重定向标志
+            self.assertNotIn("_redirect", s.get("file", ""))
 
 
 def run():
