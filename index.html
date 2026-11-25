@@ -740,8 +740,18 @@
         return s.indexOf('hdporn.gg') > -1 && s.indexOf('/videos/') > -1
       },
 
+      is1PornPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host.indexOf('1porn.tv') > -1 && String(u).toLowerCase().indexOf('/videos/') > -1) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('1porn.tv') > -1 && s.indexOf('/videos/') > -1
+      },
+
       isVideoPage(u) {
-        return this.isPornhubPage(u) || this.isPornhd3xPage(u) || this.isFreePornVideosPage(u) || this.isWhoresHubPage(u) || this.isHdPornPage(u)
+        return this.isPornhubPage(u) || this.isPornhd3xPage(u) || this.isFreePornVideosPage(u) || this.isWhoresHubPage(u) || this.isHdPornPage(u) || this.is1PornPage(u)
       },
 
       // 调用本地 ph_server 取链，再走原有解析下载或直接 MP4 下载
@@ -751,15 +761,18 @@
         const isFpv = this.isFreePornVideosPage(pageUrl)
         const isWh = this.isWhoresHubPage(pageUrl)
         const isHdp = this.isHdPornPage(pageUrl)
-        this.tips = isHdp
-          ? '正在从 hdporn.gg 解析最高质量 MP4（download_hdp，Video.js）…'
-          : (isWh
-            ? '正在从 whoreshub.com 解析最高质量 MP4（download_wh，KVS kt_player）…'
-            : (isFpv
-              ? '正在从 freepornvideos.xxx 解析最高质量 MP4（download_fpv）…'
-              : (isPhd
-                ? '正在从 pornhd3x.tv 解析 m3u8（download_phd3x）…'
-                : '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…')))
+        const is1p = this.is1PornPage(pageUrl)
+        this.tips = is1p
+          ? '正在从 1porn.tv 解析最高质量 MP4（download_1porn，Video.js，支持语言前缀）…'
+          : (isHdp
+            ? '正在从 hdporn.gg 解析最高质量 MP4（download_hdp，Video.js）…'
+            : (isWh
+              ? '正在从 whoreshub.com 解析最高质量 MP4（download_wh，KVS kt_player）…'
+              : (isFpv
+                ? '正在从 freepornvideos.xxx 解析最高质量 MP4（download_fpv）…'
+                : (isPhd
+                  ? '正在从 pornhd3x.tv 解析 m3u8（download_phd3x）…'
+                  : '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…'))))
         fetch('/api/resolve?url=' + encodeURIComponent(pageUrl))
           .then((r) => r.json().then((data) => ({ status: r.status, data })))
           .then(({ data }) => {
