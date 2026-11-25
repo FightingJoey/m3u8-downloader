@@ -40,10 +40,9 @@ from download_ph_1080 import (
     sanitize_proxy_env,
 )
 
-# 该站首页 Cookie
-FPV_COOKIE_PAIRS = [
-    ("kt_ips", "1"),
-]
+# 不要预设 kt_ips。该 Cookie 由页面 Set-Cookie 下发且含客户端 IP；
+# 写死 "1" 会把错误的 IP 绑定带给后续 get_file / CDN 请求。
+FPV_COOKIE_PAIRS: list[tuple[str, str]] = []
 
 
 def _is_safe_hostname(hostname: str) -> bool:
@@ -179,10 +178,38 @@ def extract_title(html: str) -> str | None:
 def extract_sources_from_html(html: str) -> list[dict[str, Any]]:
     """从 HTML 中提取 Video.js sources（progressiveMP4 配置）。
 
+    优先解析 <source src type=video/mp4 label>，再回退到 JS sources 对象。
     返回 [{ label, file, ... }, ...]
     """
     sources: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
+
+    for m in re.finditer(r"<source\s+([^>]+)>", html, re.I):
+        attrs = m.group(1)
+        src_match = re.search(r"""src=["']([^"']+)["']""", attrs, re.I)
+        if not src_match:
+            continue
+        src = src_match.group(1).strip()
+        if not src or src in seen_urls:
+            continue
+        type_match = re.search(r"""type=["']([^"']+)["']""", attrs, re.I)
+        media_type = type_match.group(1) if type_match else ""
+        if "video/mp4" not in media_type.lower() and ".mp4" not in src.lower():
+            continue
+        label_match = re.search(r"""label=["']([^"']+)["']""", attrs, re.I)
+        label = label_match.group(1) if label_match else ""
+        selected_match = re.search(
+            r"""selected=["']?(true|True|TRUE)["']?""", attrs, re.I
+        )
+        sources.append({
+            "file": src,
+            "label": label,
+            "selected": bool(selected_match),
+            "type": media_type or "video/mp4",
+        })
+        seen_urls.add(src)
+    if sources:
+        return sources
 
     # 1) 尝试 var playerOptions / sources = [...] JSON
     patterns = [
@@ -339,10 +366,9 @@ def probe_mp4_dimensions(data: bytes, max_scan: int = 4 * 1024 * 1024) -> tuple[
                     w = w_fp >> 16
                     h = h_fp >> 16
                     if w > 0 and h > 0 and w <= 8192 and h <= 8192:
-                        # 仅当在视频轨道或未知轨道时返回（优先视频）
-                        # 若已知非视频轨道（音频），继续查找
-                        if is_video_track or in_video_track:
-                            return w, h
+                        # 标准 trak 里 tkhd 在 hdlr 之前，扫描到 tkhd 时还不知道
+                        # 是否视频轨。音频 tkhd 宽高为 0，正尺寸即可接受。
+                        return w, h
 
             # 递归扫描容器 box
             if typ in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):

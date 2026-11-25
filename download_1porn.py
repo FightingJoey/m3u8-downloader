@@ -126,6 +126,26 @@ class OnePornSession:
         self.referer = ""  # 影片页 URL
 
 
+
+def _merge_response_cookies(session, resp) -> None:
+    """Persist Set-Cookie into the adapter session so later media fetches share it."""
+    if session is None or resp is None:
+        return
+    jar = getattr(session, "cookies", None)
+    if jar is None:
+        return
+    try:
+        incoming = resp.cookies.get_dict() if hasattr(resp.cookies, "get_dict") else {}
+    except Exception:
+        incoming = {}
+    if not incoming:
+        return
+    try:
+        jar.update(incoming)
+    except Exception:
+        pass
+
+
 def get_bytes(url: str, session: Optional[OnePornSession] = None, follow_redirects: bool = True) -> bytes:
     """
     获取 URL 内容, 带 SSRF 保护和重定向验证
@@ -159,6 +179,7 @@ def get_bytes(url: str, session: Optional[OnePornSession] = None, follow_redirec
         allow_redirects=False,
         verify=True  # TLS 验证始终开启
     )
+    _merge_response_cookies(session, resp)
     
     # 处理重定向
     if follow_redirects and resp.status_code in (301, 302, 303, 307, 308):
@@ -228,6 +249,7 @@ def get_range_bytes(url: str, start: int, end: int, session: Optional[OnePornSes
         allow_redirects=False,
         verify=True
     )
+    _merge_response_cookies(session, resp)
     
     # 处理重定向
     if resp.status_code in (301, 302, 303, 307, 308):

@@ -224,5 +224,19 @@ def run():
     unittest.main(argv=["test_hdp.py"], exit=False, verbosity=2)
 
 
+
+
+class TestHdpDecompressHeaders(unittest.TestCase):
+    def test_maybe_decompress_accepts_headers_mapping(self):
+        """get_bytes once passed resp.headers; must not call .lower() on HTTPMessage."""
+        from email.message import EmailMessage
+        from download_ph_1080 import maybe_decompress
+        import gzip
+        raw = gzip.compress(b"<html>ok</html>")
+        headers = EmailMessage()
+        headers["Content-Encoding"] = "gzip"
+        self.assertEqual(maybe_decompress(raw, headers), b"<html>ok</html>")
+
+
 if __name__ == "__main__":
     unittest.main()

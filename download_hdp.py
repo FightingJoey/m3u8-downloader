@@ -438,7 +438,8 @@ class HdpSession:
                         raise ValueError(f"Unsafe redirect target: {final_parsed.hostname}")
                 
                 data = resp.read()
-                return final_url, maybe_decompress(data, resp.headers)
+                enc = (resp.headers.get("Content-Encoding") or "")
+                return final_url, maybe_decompress(data, enc)
             except urllib.error.HTTPError as e:
                 if e.code == 403:
                     # CDN 可能返回 403 Wrong IP，记录但不暴露签名

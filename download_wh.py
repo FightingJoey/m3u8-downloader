@@ -119,7 +119,7 @@ def site_origin_wh(url: str) -> str:
     scheme = p.scheme or "https"
     netloc = p.netloc or (p.hostname or "")
     if not netloc:
-        return "https://www.freepornvideos.xxx"
+        return "https://www.whoreshub.com"
     return f"{scheme}://{netloc}"
 
 
@@ -370,10 +370,9 @@ def probe_mp4_dimensions(data: bytes, max_scan: int = 4 * 1024 * 1024) -> tuple[
                     w = w_fp >> 16
                     h = h_fp >> 16
                     if w > 0 and h > 0 and w <= 8192 and h <= 8192:
-                        # 仅当在视频轨道或未知轨道时返回（优先视频）
-                        # 若已知非视频轨道（音频），继续查找
-                        if is_video_track or in_video_track:
-                            return w, h
+                        # 标准 trak 里 tkhd 在 hdlr 之前，扫描到 tkhd 时还不知道
+                        # 是否视频轨。音频 tkhd 宽高为 0，正尺寸即可接受。
+                        return w, h
 
             # 递归扫描容器 box
             if typ in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):
@@ -434,7 +433,7 @@ def pick_best_wh_source(
         # 验证 URL 安全性
         parsed = urlparse(url)
         if not _is_safe_hostname(parsed.hostname or ""):
-            print(f"[warn] fpv 源 label={label} 主机名不安全: {parsed.hostname}")
+            print(f"[warn] wh 源 label={label} 主机名不安全: {parsed.hostname}")
             continue
         
         # 探测实际尺寸（扩展到 4MB 以支持大 moov）
@@ -445,17 +444,17 @@ def pick_best_wh_source(
                 w, h = dims
                 probed_any = True
                 print(
-                    f"[info] fpv 源 label={label} ({label_h}p) 实际 {w}x{h}"
+                    f"[info] wh 源 label={label} ({label_h}p) 实际 {w}x{h}"
                 )
                 if best is None or (h * w) > (best[3] * best[4]):
                     best = (url, label_h, label, w, h)
             else:
-                print(f"[warn] fpv 源 label={label} 无法探测尺寸（moov 不完整或格式异常）")
+                print(f"[warn] wh 源 label={label} 无法探测尺寸（moov 不完整或格式异常）")
                 # 无法探测：标注 (0, 0) 表示 LABEL_FALLBACK
                 if best is None:
                     best = (url, label_h, label, 0, 0)
         except Exception as e:
-            print(f"[warn] fpv 源 label={label} Range 探测失败: {e}")
+            print(f"[warn] wh 源 label={label} Range 探测失败: {e}")
             if best is None:
                 best = (url, label_h, label, 0, 0)
 
@@ -464,7 +463,7 @@ def pick_best_wh_source(
     
     # 警告：若所有源都无法探测，仅按标签排序（不准确）
     if not probed_any and best[3] == 0 and best[4] == 0:
-        print(f"[warn] fpv 所有源无法探测实际尺寸，按标签排序（可能不准确）")
+        print(f"[warn] wh 所有源无法探测实际尺寸，按标签排序（可能不准确）")
     
     return best
 
@@ -624,12 +623,40 @@ class WhSession:
             raise
 
 
+    def get_bytes(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: int = 60,
+        validate_redirect: bool = True,
+    ) -> tuple[str, bytes]:
+        """Alias for get_bytes_wh, so /proxy can use the same method as FpvSession."""
+        return self.get_bytes_wh(
+            url, headers=headers, timeout=timeout, validate_redirect=validate_redirect
+        )
+
+    def get_range_bytes(
+        self,
+        url: str,
+        start: int,
+        end: int,
+        *,
+        referer: str | None = None,
+        timeout: int = 30,
+    ) -> bytes:
+        """Alias for get_range_bytes_wh."""
+        return self.get_range_bytes_wh(
+            url, start, end, referer=referer, timeout=timeout
+        )
+
+
 def fetch_page(
     session: WhSession, page_url: str, *, tries: int = 3
 ) -> tuple[str, str]:
     last: Exception | None = None
     for i in range(1, tries + 1):
-        print(f"[info] freepornvideos 拉页 ({i}/{tries}): {page_url}")
+        print(f"[info] whoreshub 拉页 ({i}/{tries}): {page_url}")
         try:
             final, html = session.get_text(page_url, headers=session.page_headers())
             session.page_url = final
@@ -638,7 +665,7 @@ def fetch_page(
             return final, html
         except Exception as e:
             last = e
-            print(f"[warn] freepornvideos 拉页失败: {e}")
+            print(f"[warn] whoreshub 拉页失败: {e}")
     assert last is not None
     raise last
 

@@ -114,6 +114,61 @@ def _proxy_path(abs_url: str, job_id: str) -> str:
     return f"/proxy?job={quote(job_id, safe='')}&u={quote(abs_url, safe='')}"
 
 
+# 各站点适配器白名单的并集。/proxy 必须用这一份，不能只用 download_fpv 的名单，
+# 否则 whoreshub.com / hdporn.gg / 1porn.tv / okcdn.ru 的 get_file 或 CDN 会被 SSRF 拦成 403。
+_PROXY_ALLOWED_SUFFIXES = (
+    "freepornvideos.xxx",
+    "fpvcdn.com",
+    "whoreshub.com",
+    "cdntrex.com",
+    "hdporn.gg",
+    "ahcdn.com",
+    "1porn.tv",
+    "fullpornxxx.net",
+    "ok.ru",
+    "okcdn.ru",
+    "phncdn.com",
+    "pornhd3x.tv",
+)
+_MP4_SITES = frozenset({"fpv", "wh", "hdp", "1porn", "fpx"})
+def _redact_url(url: str) -> str:
+    """Strip short-lived tokens from a URL or a log line that contains one."""
+    # Regex (not urlparse) so access-log lines are not rewritten as URLs.
+    out = re.sub(
+        r"(v-acctoken(?:=|%3D|%3d))[^&\s%]+",
+        r"\1REDACTED",
+        url,
+        flags=re.I,
+    )
+    out = re.sub(r"(kt_ips=)[^;\s&%]+", r"\1REDACTED", out, flags=re.I)
+    out = re.sub(
+        r"((?:acc)?token(?:=|%3D|%3d))[^&\s%]+",
+        r"\1REDACTED",
+        out,
+        flags=re.I,
+    )
+    return out
+
+
+def _proxy_host_allowed(hostname: str) -> bool:
+    """Tight SSRF allowlist for /proxy targets (page get_file hosts + known CDNs)."""
+    host = (hostname or "").lower().strip()
+    if not host or host in {"localhost", "localhost.localdomain"}:
+        return False
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(host)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            return False
+        return False  # raw IPs are never in the domain allowlist
+    except ValueError:
+        pass
+    for domain in _PROXY_ALLOWED_SUFFIXES:
+        if host == domain or host.endswith("." + domain):
+            return True
+    return False
+
+
 def _query_param_once(query: str, key: str) -> str:
     """从 query string 取参数并只 unquote 一次（parse_qs 后再 unquote 会破坏 CDN 签名里的 %3D）。"""
     prefix = key + "="
@@ -390,7 +445,10 @@ def resolve_fpv_job(page_url: str) -> dict:
 def resolve_fpx_job_wrapper(page_url: str) -> dict:
     """fullpornxxx.net：直接 MP4 下载（OK.ru API + AES 解密）"""
     _purge_old_jobs()
-    got = resolve_fpx_job(page_url)
+    try:
+        got = resolve_fpx_job(page_url)
+    except Exception as e:
+        return {"ok": False, "error": f"fullpornxxx.net 解析失败: {e}"}
     if not got.get("job_id"):
         return {
             "ok": False,
@@ -422,24 +480,32 @@ def resolve_fpx_job_wrapper(page_url: str) -> dict:
     with _JOBS_LOCK:
         _JOBS[job_id] = {
             "session": got["session"],
-            "referer": got.get("page_url"),
+            "referer": got.get("page_url") or page_url,
             "site": "fpx",
+            "mp4_url": mp4_url,
+            "created": time.time(),
+            "title": title,
         }
     
     return {
         "ok": True,
+        "is_mp4": True,
         "job_id": job_id,
+        "mp4_url": _proxy_path(mp4_url, job_id),
         "title": title,
         "quality": quality_note,
-        "is_mp4_direct": True,
-        "mp4_url": mp4_url,
+        "quality_label": quality_label,
+        "site": "fpx",
     }
 
 
 def resolve_1porn_job_wrapper(page_url: str) -> dict:
     """1porn.tv：直接 MP4 下载（Video.js + KVS get_file），支持语言前缀。"""
     _purge_old_jobs()
-    got = resolve_1porn_job(page_url)
+    try:
+        got = resolve_1porn_job(page_url)
+    except Exception as e:
+        return {"ok": False, "error": f"1porn.tv 解析失败: {e}"}
     if not got.get("job_id"):
         return {
             "ok": False,
@@ -471,17 +537,22 @@ def resolve_1porn_job_wrapper(page_url: str) -> dict:
     with _JOBS_LOCK:
         _JOBS[job_id] = {
             "session": got["session"],
-            "referer": got.get("page_url"),
+            "referer": got.get("page_url") or page_url,
             "site": "1porn",
+            "mp4_url": mp4_url,
+            "created": time.time(),
+            "title": title,
         }
     
     return {
         "ok": True,
+        "is_mp4": True,
         "job_id": job_id,
+        "mp4_url": _proxy_path(mp4_url, job_id),
         "title": title,
         "quality": quality_note,
-        "is_mp4_direct": True,
-        "mp4_url": mp4_url,
+        "quality_label": quality_label,
+        "site": "1porn",
     }
 
 
@@ -612,6 +683,8 @@ def resolve_wh_job(page_url: str) -> dict:
         "actual_resolution": f"{actual_w}x{actual_h}" if actual_w and actual_h else None,
         "video_id": got.get("video_id"),
         "title": title,
+        "notes": got.get("notes") or [],
+        "site": "wh",
     }
 
 
@@ -635,8 +708,180 @@ def resolve_page(page_url: str) -> dict:
         return resolve_ph(page_url)
     return {
         "ok": False,
-        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）、pornhd3x.tv 影片页（/movies/…）、freepornvideos.xxx 视频页（/videos/…）、whoreshub.com 视频页（/videos/…）或 hdporn.gg 视频页（/videos/…）",
+        "error": "请输入 Pornhub、pornhd3x.tv、freepornvideos.xxx、whoreshub.com、hdporn.gg、1porn.tv 或 fullpornxxx.net 的视频页链接",
     }
+
+
+
+def _mp4_request_headers(session, site: str, target: str, referer: str, range_header: str | None) -> dict[str, str]:
+    """Build media headers. Never send Origin to okcdn.ru (fullpornxxx / OK.ru)."""
+    headers: dict[str, str] = {}
+    if site == "fpx":
+        # okcdn.ru returns HTTP 400 (error 16) if Origin is present.
+        from download_fpx import USER_AGENT as FPX_UA
+        headers["User-Agent"] = FPX_UA
+        if referer:
+            headers["Referer"] = referer
+        headers["Accept"] = "*/*"
+    elif site == "1porn":
+        from download_1porn import USER_AGENT as PORN_UA
+        headers["User-Agent"] = PORN_UA
+        if referer:
+            headers["Referer"] = referer
+        headers["Accept"] = "*/*"
+    elif hasattr(session, "media_headers"):
+        headers = dict(session.media_headers(referer=referer or None))
+    else:
+        headers = {"Accept": "*/*"}
+        if referer:
+            headers["Referer"] = referer
+    if range_header and range_header.lower().startswith("bytes="):
+        headers["Range"] = range_header
+    return headers
+
+
+def _iter_urllib_mp4(session, target: str, headers: dict[str, str], timeout: int = 180):
+    """Open an MP4 via the job's urllib opener, follow redirects, validate hosts."""
+    import urllib.request
+    import urllib.error
+
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https") or not _proxy_host_allowed(parsed.hostname or ""):
+        raise ValueError(f"目标主机名不允许: {parsed.hostname}")
+    req = urllib.request.Request(target, headers=headers)
+    opener = getattr(session, "opener", None)
+    if opener is None:
+        opener = urllib.request.build_opener()
+    resp = opener.open(req, timeout=timeout)
+    final = resp.geturl()
+    final_host = urlparse(final).hostname or ""
+    if not _proxy_host_allowed(final_host):
+        try:
+            resp.close()
+        except Exception:
+            pass
+        raise ValueError(f"Unsafe redirect to: {final_host}")
+    return resp
+
+
+def _iter_requests_mp4(session, target: str, headers: dict[str, str], timeout: int = 180):
+    """Open an MP4 via requests, following redirects with the same SSRF checks. stream=True."""
+    import requests
+    from urllib.parse import urljoin as _urljoin
+
+    url = target
+    last = None
+    for _ in range(8):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not _proxy_host_allowed(parsed.hostname or ""):
+            if last is not None:
+                last.close()
+            raise ValueError(f"目标主机名不允许: {parsed.hostname}")
+        http = getattr(session, "http", None)
+        cookies = None
+        if http is None:
+            cookies = getattr(session, "cookies", None) or {}
+            last = requests.get(
+                url,
+                headers=headers,
+                cookies=cookies,
+                timeout=timeout,
+                allow_redirects=False,
+                verify=True,
+                stream=True,
+            )
+        else:
+            last = http.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=False,
+                verify=True,
+                stream=True,
+            )
+        if last.status_code in (301, 302, 303, 307, 308):
+            loc = last.headers.get("Location") or ""
+            last.close()
+            if not loc:
+                raise ValueError("重定向缺少 Location")
+            url = _urljoin(url, loc)
+            # Range / Referer stay; never add Origin on subsequent hops (okcdn.ru).
+            continue
+        return last
+    raise ValueError("重定向次数过多")
+
+
+def _stream_mp4_proxy(handler: "Handler", job: dict, target: str, range_header: str | None) -> None:
+    """Stream a progressive MP4 through /proxy with Range support and session cookies."""
+    session = job["session"]
+    referer: str = job.get("referer") or ""
+    site = job.get("site") or ""
+    headers = _mp4_request_headers(session, site, target, referer, range_header)
+    upstream = None
+    try:
+        if site in {"1porn", "fpx"}:
+            upstream = _iter_requests_mp4(session, target, headers)
+            status = upstream.status_code
+            up_headers = upstream.headers
+            def _chunks():
+                for chunk in upstream.iter_content(64 * 1024):
+                    if chunk:
+                        yield chunk
+            closer = upstream.close
+        else:
+            upstream = _iter_urllib_mp4(session, target, headers)
+            status = getattr(upstream, "status", None) or upstream.getcode()
+            up_headers = upstream.headers
+            def _chunks():
+                while True:
+                    chunk = upstream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            closer = upstream.close
+
+        if status not in (200, 206):
+            # Drain a short error body for the message, do not log tokens.
+            try:
+                if site in {"1porn", "fpx"}:
+                    preview = (upstream.content or b"")[:120]
+                else:
+                    preview = upstream.read(120)
+            except Exception:
+                preview = b""
+            closer()
+            raise ValueError(f"上游 HTTP {status}")
+
+        ctype = up_headers.get("Content-Type") or "video/mp4"
+        if "html" in ctype.lower() or "json" in ctype.lower():
+            closer()
+            raise ValueError(f"上游返回非视频类型: {ctype}")
+        clen = up_headers.get("Content-Length")
+        crange = up_headers.get("Content-Range")
+        accept_ranges = up_headers.get("Accept-Ranges") or "bytes"
+
+        handler.send_response(status)
+        handler.send_header("Content-Type", ctype if ctype else "video/mp4")
+        if clen:
+            handler.send_header("Content-Length", clen)
+        if crange:
+            handler.send_header("Content-Range", crange)
+        handler.send_header("Accept-Ranges", accept_ranges)
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header(
+            "Access-Control-Expose-Headers",
+            "Content-Length, Content-Range, Content-Type, Accept-Ranges",
+        )
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        for chunk in _chunks():
+            handler.wfile.write(chunk)
+    finally:
+        if upstream is not None:
+            try:
+                upstream.close()
+            except Exception:
+                pass
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -644,7 +889,11 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("[http] " + (fmt % args) + "\n")
+        try:
+            msg = fmt % args
+        except Exception:
+            msg = fmt
+        sys.stderr.write("[http] " + _redact_url(msg) + "\n")
 
     def _send_json(self, code: int, obj: dict) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -742,16 +991,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         # 验证目标 URL 主机名（防 SSRF）
         try:
-            from download_fpv import _is_safe_hostname
             parsed_target = urlparse(target)
             target_host = parsed_target.hostname or ""
-            # fpvcdn.com / phncdn.com / pornhd3x / cdntrex CDN 等已知合法
-            allowed_cdn = ("fpvcdn.com", "phncdn.com", "pornhd3x.tv", "cdntrex.com")
-            is_allowed = any(
-                target_host == cdn or target_host.endswith("." + cdn)
-                for cdn in allowed_cdn
-            ) or _is_safe_hostname(target_host)
-            if not is_allowed:
+            if parsed_target.scheme not in ("http", "https") or not _proxy_host_allowed(target_host):
                 sys.stderr.write(f"[proxy] SSRF blocked: {target_host}\n")
                 return self._send_json(403, {"ok": False, "error": f"目标主机名不允许: {target_host}"})
         except Exception as e:
@@ -769,68 +1011,18 @@ class Handler(SimpleHTTPRequestHandler):
         referer: str = job.get("referer") or ""
         site = job.get("site") or "pornhub"
 
-        # freepornvideos: 支持 Range 请求（流式下载 / 断点续传）+ Cookie 保留
-        if site == "fpv":
+        # 渐进式 MP4 站点：透传 Range，流式转发，保留解析会话 Cookie / Referer
+        if site in _MP4_SITES:
             range_header = self.headers.get("Range")
             try:
-                if range_header and range_header.startswith("bytes="):
-                    # Range 请求：解析 bytes=start-end
-                    parts = range_header[6:].split("-", 1)
-                    start = int(parts[0]) if parts[0] else 0
-                    end = int(parts[1]) if len(parts) > 1 and parts[1] else None
-                    # fpv session 支持 Range
-                    if end is None:
-                        # 请求到文件末尾：先 HEAD 获取总大小
-                        # 简化：直接用 get_bytes 拉整个（后续可优化为真 Range）
-                        _final, data = session.get_bytes(
-                            target, headers=session.media_headers(referer=referer)
-                        )
-                        if start > 0:
-                            data = data[start:]
-                        # 返回 206 Partial Content
-                        self.send_response(206)
-                        self.send_header("Content-Type", "video/mp4")
-                        self.send_header("Content-Length", str(len(data)))
-                        self.send_header("Content-Range", f"bytes {start}-{start+len(data)-1}/*")
-                        self.send_header("Access-Control-Allow-Origin", "*")
-                        self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Type")
-                        self.send_header("Accept-Ranges", "bytes")
-                        self.send_header("Cache-Control", "no-store")
-                        self.end_headers()
-                        self.wfile.write(data)
-                    else:
-                        # 指定 Range
-                        data = session.get_range_bytes(target, start, end, referer=referer)
-                        self.send_response(206)
-                        self.send_header("Content-Type", "video/mp4")
-                        self.send_header("Content-Length", str(len(data)))
-                        self.send_header("Content-Range", f"bytes {start}-{end}/*")
-                        self.send_header("Access-Control-Allow-Origin", "*")
-                        self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Type")
-                        self.send_header("Accept-Ranges", "bytes")
-                        self.send_header("Cache-Control", "no-store")
-                        self.end_headers()
-                        self.wfile.write(data)
-                else:
-                    # 完整请求
-                    _final, data = session.get_bytes(
-                        target, headers=session.media_headers(referer=referer)
-                    )
-                    self.send_response(200)
-                    self.send_header("Content-Type", "video/mp4")
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                    self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type")
-                    self.send_header("Accept-Ranges", "bytes")
-                    self.send_header("Cache-Control", "no-store")
-                    self.end_headers()
-                    self.wfile.write(data)
+                _stream_mp4_proxy(self, job, target, range_header)
             except Exception as e:
-                sys.stderr.write(f"[proxy] fpv fail {target[:120]}: {e}\n")
+                sys.stderr.write(f"[proxy] {site} fail {_redact_url(target)[:180]}: {e}\n")
                 return self._send_json(502, {"ok": False, "error": str(e)})
             return
 
         # pornhub / phd3x: 现有逻辑
+
         try:
             if site == "phd3x" or job.get("no_referer"):
                 # 播放列表按站点要求不带 Referer；分片同样走该会话
@@ -842,7 +1034,7 @@ class Handler(SimpleHTTPRequestHandler):
                     session, target, referer=referer, for_media=True
                 )
         except Exception as e:
-            sys.stderr.write(f"[proxy] fail {target[:120]}: {e}\n")
+            sys.stderr.write(f"[proxy] fail {_redact_url(target)[:180]}: {e}\n")
             return self._send_json(502, {"ok": False, "error": str(e)})
 
         data, stripped = strip_png_wrapped_ts(data)

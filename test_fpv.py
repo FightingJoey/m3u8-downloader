@@ -14,7 +14,10 @@ freepornvideos.xxx 取链与元数据解析的离线回归测试。
 import struct
 import unittest
 
+from download_ph_1080 import UA, SEC_CH_UA
+
 from download_fpv import (
+    FPV_COOKIE_PAIRS,
     _clean_title,
     extract_sources_from_html,
     extract_title,
@@ -89,6 +92,25 @@ class TestFpvTitleExtraction(unittest.TestCase):
 
 class TestFpvSourceExtraction(unittest.TestCase):
     """从 HTML 提取 Video.js sources。"""
+
+
+    def test_extract_sources_from_source_tags(self):
+        """Current FPV pages use Video.js <source> tags, not playerOptions JSON."""
+        html = """
+        <video class='video-js' poster='https://img.freepornvideos.xxx/x/1.jpg'>
+        <source src='https://www.freepornvideos.xxx/zh/get_file/8512/HASH/93782000/93782426/93782426_2160m.mp4/' type='video/mp4' label="2160p">
+        <source src='https://www.freepornvideos.xxx/zh/get_file/8512/HASH/93782000/93782426/93782426_720m.mp4/' type='video/mp4' label="720p" selected="true">
+        <source src='https://www.freepornvideos.xxx/zh/get_file/8512/HASH/93782000/93782426/93782426_480m.mp4/' type='video/mp4' label="480p">
+        </video>
+        { file: 'https://img.freepornvideos.xxx/93782000/93782426/player/1.jpg' }
+        """
+        sources = extract_sources_from_html(html)
+        self.assertEqual([s["label"] for s in sources], ["2160p", "720p", "480p"])
+        self.assertTrue(sources[1]["selected"])
+        for s in sources:
+            self.assertIn("/get_file/", s["file"])
+            self.assertIn(".mp4", s["file"])
+            self.assertNotIn("img.freepornvideos.xxx", s["file"])
 
     def test_extract_sources_json(self):
         html = """
@@ -215,6 +237,43 @@ class TestFpvResolutionLogic(unittest.TestCase):
             label_2160_actual[0] * label_2160_actual[1],
             label_720_actual[0] * label_720_actual[1],
         )
+
+
+
+def _synthetic_mp4(width: int, height: int) -> bytes:
+    import struct
+
+    def box(typ: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + typ + payload
+
+    tkhd = bytearray(84)
+    struct.pack_into(">I", tkhd, 76, width << 16)
+    struct.pack_into(">I", tkhd, 80, height << 16)
+    hdlr = b"\x00" * 8 + b"vide" + b"\x00" * 13
+    mdia = box(b"mdia", box(b"hdlr", hdlr))
+    trak = box(b"trak", box(b"tkhd", bytes(tkhd)) + mdia)
+    moov = box(b"moov", trak)
+    ftyp = box(b"ftyp", b"isom" + struct.pack(">I", 0) + b"isomiso2mp41")
+    return ftyp + moov
+
+
+class TestFpvProbeDimensions(unittest.TestCase):
+    def test_probe_reads_tkhd_before_hdlr(self):
+        self.assertEqual(probe_mp4_dimensions(_synthetic_mp4(1920, 1080)), (1920, 1080))
+
+
+class TestFpvCookieSeeding(unittest.TestCase):
+    def test_does_not_seed_fake_kt_ips(self):
+        """kt_ips must come from the page Set-Cookie, never a placeholder like '1'."""
+        self.assertFalse(any(name == "kt_ips" for name, _ in FPV_COOKIE_PAIRS))
+
+
+class TestSharedUserAgent(unittest.TestCase):
+    def test_ua_is_not_cloudflare_blocked_chrome_140_plus(self):
+        """urllib + Chrome 140+ UA is 502'd by freepornvideos.xxx Cloudflare."""
+        self.assertIn("Chrome/131", UA)
+        self.assertNotIn("Chrome/14", UA)
+        self.assertIn("v=\"131\"", SEC_CH_UA)
 
 
 def run():
