@@ -45,14 +45,14 @@ python3 ph_server.py
 | 打开 1porn.tv 页、解析 Video.js sources（支持语言前缀）、探测 MP4 实际分辨率选最高质量源（2160p 标签常误导） | `download_1porn.py`（`resolve_1porn_job` / `extract_sources_from_html` / `pick_best_source`） |
 | 打开 fullpornxxx.net 页、AES 解密 session_key、调用 OK.ru API、探测 MP4 实际分辨率选最高质量源（样本最高 720p） | `download_fpx.py`（`resolve_fpx_job` / `decrypt_session_key` / `get_ok_video_sources` / `pick_best_source`） |
 | 把分片 URL 改写为同源 `/proxy`；pornhd3x 分片剥掉 PNG 包装；freepornvideos/whoreshub/hdporn/1porn/fullpornxxx 透传 MP4（支持 Range） | `ph_server.py` |
-| 解析 m3u8、多线程下分片、AES、mux 成 MP4；freepornvideos/whoreshub/hdporn/1porn/fullpornxxx 直接下载 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
+| 解析 m3u8、多线程下分片、AES、mux 成 MP4；freepornvideos/whoreshub/hdporn/1porn/fullpornxxx 的渐进式 MP4 交给浏览器原生下载管理器 | 原版 `index.html` + `mux-mp4.js` 等 |
 
 API：
 
 - `GET/POST /api/resolve?url=<影片页>` → `{ ok, playlist_url | mp4_url, media_url, segment_count, title, quality, viewkey | episode_id | video_id, is_mp4?, actual_resolution?, ... }`
   - `is_mp4: true` - freepornvideos/whoreshub MP4 直接下载
   - `actual_resolution` - 实际探测分辨率（如 `3840x2160`，不信标签）
-- `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie（Pornhub 另带 Referer）拉 CDN 分片；若正文是 PNG 包装的 MPEG-TS 则剥壳并以 `video/mp2t` 返回；freepornvideos 支持 Range 请求（流式下载 / 断点续传）
+- `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie（Pornhub 另带 Referer）拉 CDN 分片；若正文是 PNG 包装的 MPEG-TS 则剥壳并以 `video/mp2t` 返回；渐进式 MP4 站点支持 Range（流式 / 断点续传）。前端下载时追加 `dl=1&filename=…`，响应带 `Content-Disposition: attachment` 和 `Content-Length`，交给 Chrome 原生下载栏显示进度。Cookie / Referer / 出口 IP 仍留在服务端会话，不把裸 CDN 链接交给浏览器。
 - `GET /cache/<job>_*.m3u8` → 改写后的播放列表
 
 ## 依赖
@@ -87,7 +87,7 @@ API：
 
 **pornhd3x.tv**: 同时支持 `pornhd3x.tv` 及其 `wwwN` 子域的 `/movies/…` 影片页（例如 `https://www9.pornhd3x.tv/movies/……`）。用法与 Pornhub 相同：把影片页 URL 贴进输入框，点「转码为MP4下载」。该站目前常见只有一档 **720P**；分片可能是「小 PNG + MPEG-TS」，代理会剥壳后再给前端合成。
 
-**freepornvideos.xxx**: 支持 `/videos/数字/` 视频页（例如 `https://www.freepornvideos.xxx/videos/93810393/title/`）。该站使用 Video.js progressive MP4（原生 MP4，非 HLS），**源标签可能误导**（如 2160p 实际为 1920x1080）。服务会探测每个候选源的 MP4 头部（moov/trak/tkhd box，前 512KB）以获取真实分辨率，选择 **实际像素最高** 的源。下载走浏览器直接下载（fetch + blob），服务端透传并保留 Cookie/UA，支持 Range 请求。
+**freepornvideos.xxx**: 支持 `/videos/数字/` 视频页（例如 `https://www.freepornvideos.xxx/videos/93810393/title/`）。该站使用 Video.js progressive MP4（原生 MP4，非 HLS），**源标签可能误导**（如 2160p 实际为 1920x1080）。服务会探测每个候选源的 MP4 头部（moov/trak/tkhd box，前 512KB）以获取真实分辨率，选择 **实际像素最高** 的源。下载交给浏览器原生下载管理器（同源 `/proxy?dl=1`，`Content-Disposition: attachment`），服务端透传并保留 Cookie/UA/Referer，支持 Range 与进度显示。不把裸 CDN 链接交给 Chrome，以免会话 Cookie / 签名 / IP 绑定导致 403。
 
 Docker / 代理注意事项与下面各节相同，容器里访问外网仍需按原说明传入代理。
 

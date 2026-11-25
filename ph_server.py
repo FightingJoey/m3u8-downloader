@@ -3,7 +3,7 @@
 """
 本地桥接服务：在 m3u8-downloader 页面里输入视频页 URL，
 后端按站点取最高可用清晰度 m3u8/MP4，把分片 URL 改写为同源 /proxy，
-前端仍用原有 JS 分片下载 + mux-mp4 合成（或直接下载 MP4）。
+前端仍用原有 JS 分片下载 + mux-mp4 合成；渐进式 MP4 则走浏览器原生下载。
 
 支持:
   - Pornhub 视频页（download_ph_1080.py）
@@ -176,6 +176,40 @@ def _query_param_once(query: str, key: str) -> str:
         if part.startswith(prefix):
             return unquote(part[len(prefix) :])
     return ""
+
+
+def _safe_download_filename(name: str) -> str:
+    """Sanitize a user/job title for Content-Disposition (no paths, no header injection)."""
+    name = str(name or "").replace("\\", "/").split("/")[-1]
+    name = re.sub(r'[\x00-\x1f\x7f:"*?<>|]+', "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if not name:
+        name = "video"
+    if not name.lower().endswith(".mp4"):
+        name += ".mp4"
+    if len(name) > 184:
+        name = name[:180] + ".mp4"
+    return name
+
+
+def _content_disposition_attachment(filename: str) -> str:
+    """RFC 6266 attachment header with ASCII fallback and UTF-8 filename*."""
+    safe = _safe_download_filename(filename)
+    ascii_name = re.sub(r"[^\x20-\x7e]", "_", safe).replace(";", "_").replace('"', "_")
+    ascii_name = ascii_name.replace("\\", "_")
+    if not ascii_name or ascii_name.lower() == ".mp4" or ascii_name.startswith("."):
+        ascii_name = "video.mp4"
+    encoded = quote(safe, safe="")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
+
+
+def _mp4_download_filename(query: str, job: dict) -> str | None:
+    """Only force a file download when the UI asks via dl=1; keep /proxy streamable otherwise."""
+    dl = (_query_param_once(query, "dl") or "").strip().lower()
+    if dl not in {"1", "true", "yes"}:
+        return None
+    name = _query_param_once(query, "filename") or job.get("title") or "video"
+    return _safe_download_filename(name)
 
 
 def _media_content_type(url: str) -> str:
@@ -811,7 +845,13 @@ def _iter_requests_mp4(session, target: str, headers: dict[str, str], timeout: i
     raise ValueError("重定向次数过多")
 
 
-def _stream_mp4_proxy(handler: "Handler", job: dict, target: str, range_header: str | None) -> None:
+def _stream_mp4_proxy(
+    handler: "Handler",
+    job: dict,
+    target: str,
+    range_header: str | None,
+    download_filename: str | None = None,
+) -> None:
     """Stream a progressive MP4 through /proxy with Range support and session cookies."""
     session = job["session"]
     referer: str = job.get("referer") or ""
@@ -868,10 +908,11 @@ def _stream_mp4_proxy(handler: "Handler", job: dict, target: str, range_header: 
             handler.send_header("Content-Range", crange)
         handler.send_header("Accept-Ranges", accept_ranges)
         handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header(
-            "Access-Control-Expose-Headers",
-            "Content-Length, Content-Range, Content-Type, Accept-Ranges",
-        )
+        expose = "Content-Length, Content-Range, Content-Type, Accept-Ranges"
+        if download_filename:
+            handler.send_header("Content-Disposition", _content_disposition_attachment(download_filename))
+            expose += ", Content-Disposition"
+        handler.send_header("Access-Control-Expose-Headers", expose)
         handler.send_header("Cache-Control", "no-store")
         handler.end_headers()
         for chunk in _chunks():
@@ -1012,10 +1053,12 @@ class Handler(SimpleHTTPRequestHandler):
         site = job.get("site") or "pornhub"
 
         # 渐进式 MP4 站点：透传 Range，流式转发，保留解析会话 Cookie / Referer
+        # dl=1 时加 Content-Disposition: attachment，让 Chrome 走原生下载栏（进度/取消/另存）
         if site in _MP4_SITES:
             range_header = self.headers.get("Range")
+            download_filename = _mp4_download_filename(query, job)
             try:
-                _stream_mp4_proxy(self, job, target, range_header)
+                _stream_mp4_proxy(self, job, target, range_header, download_filename)
             except Exception as e:
                 sys.stderr.write(f"[proxy] {site} fail {_redact_url(target)[:180]}: {e}\n")
                 return self._send_json(502, {"ok": False, "error": str(e)})
