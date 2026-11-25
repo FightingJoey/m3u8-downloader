@@ -1,11 +1,16 @@
-# Pornhub / pornhd3x.tv 影片页 → m3u8-downloader
+# Pornhub / pornhd3x.tv / freepornvideos.xxx / whoreshub.com / hdporn.gg 影片页 → m3u8-downloader
 
 在原版 [m3u8-downloader](https://github.com/Momo707577045/m3u8-downloader) 基础上，同时支持两种输入：
 
 1. **URL 含 `m3u8`**：当作播放列表，走原前端直接解析 / 分片下载（不调 `/api/resolve`）
-2. **URL 不含 `m3u8`**：当作影片页，后端取 **最高可用清晰度** m3u8，再走原分片下载 + `mux-mp4.js`；合成后的 MP4 **用原视频标题命名**
+2. **URL 不含 `m3u8`**：当作影片页，后端取 **最高可用清晰度** m3u8/MP4，再走原分片下载 + `mux-mp4.js` 或直接下载；合成后的 MP4 **用原视频标题命名**
    - **Pornhub**（`view_video` / `viewkey` / embed）：`download_ph_1080.py`，优先 `index-v1-a1.m3u8`（2160/1080/720/480…）
    - **pornhd3x.tv**（含 `wwwN.pornhd3x.tv` 的 `/movies/…` 页）：`download_phd3x.py`；该站分片常带一层 PNG 包装，`/proxy` 会剥壳后再交给 `mux-mp4.js`
+   - **freepornvideos.xxx**（`/videos/数字/` 页）：`download_fpv.py`；原生 MP4 渐进式下载（Video.js progressive），按实际分辨率选择最高质量源（探测 MP4 元数据，不信标签）
+   - **whoreshub.com**（`/videos/数字/` 页）：`download_wh.py`；KVS kt_player + flashvars 配置，原生 MP4 渐进式下载，支持真 4K（3840x2160），按实际分辨率选择最高质量源（探测 MP4 元数据）
+   - **hdporn.gg**（`/videos/{slug}/` 页）：`download_hdp.py`；Video.js + KVS get_file 分发，原生 MP4 渐进式下载，按实际分辨率选择最高质量源（探测 MP4 元数据，处理 CDN IP 绑定）
+   - **1porn.tv**（`/videos/{slug}/` 或 `/{lang}/videos/{slug}/` 页）：`download_1porn.py`；Video.js progressive MP4（与 hdporn 类似），支持语言前缀（如 `/zh/videos/`），按实际分辨率选择最高质量源（探测 MP4 元数据，2160p 标签常为误导，实际可能是 1080p）
+   - **fullpornxxx.net**（`/video/{id}/{slug}/` 页）：`download_fpx.py`；KVS kt_player + generate_mp4 加密调用，AES-256-CBC + PBKDF2-SHA512-999 解密，OK.ru video.get API，按实际分辨率选择最高质量源（样本最高 720p，不是 4K）
 
 ## 怎么跑
 
@@ -19,9 +24,14 @@ python3 ph_server.py
 1. 粘贴链接（任选）：
    - Pornhub 视频页：`https://cn.pornhub.com/view_video.php?viewkey=XXXX`（URL 中无 `m3u8`）
    - pornhd3x.tv 影片页：`https://www9.pornhd3x.tv/movies/……`
+   - freepornvideos.xxx 视频页：`https://www.freepornvideos.xxx/videos/93810393/title/`
+   - whoreshub.com 视频页：`https://www.whoreshub.com/videos/730394/title/`
+   - hdporn.gg 视频页：`https://www.hdporn.gg/videos/blonde-hottie-not-found-but-brunette-hottie-found/`
+   - 1porn.tv 视频页：`https://www.1porn.tv/videos/big-dick-big-problems/` 或 `https://www.1porn.tv/zh/videos/big-dick-big-problems/`
+   - fullpornxxx.net 视频页：`https://www.fullpornxxx.net/video/35975/gimme-all-2_v2/`
    - 或直接粘贴 `.m3u8` / 含 `m3u8` 的播放列表 URL
 2. 点 **「转码为MP4下载」**（或「原格式下载」）
-3. 影片页模式：等待「已取到 xxxP / 最高清晰度播放列表」，分片下载后合成；MP4 文件名优先用页面原标题（`og:title` / `movie.name` 等），缺省才用 viewkey 或影片 id
+3. 影片页模式：等待「已取到 xxxP / 最高清晰度播放列表」或「已取到 xxxx MP4」，分片下载后合成或直接下载；MP4 文件名优先用页面原标题（`og:title` / `movie.name` 等），缺省才用 viewkey / episode_id / video_id
 
 ## 原理
 
@@ -29,13 +39,20 @@ python3 ph_server.py
 |------|------|
 | 打开 Pornhub 页、选最高清晰度 `*index-v1-a1.m3u8` | `download_ph_1080.py`（`http_find_1080` / `resolve_1080_media_playlist`） |
 | 打开 pornhd3x.tv 影片页、调 `get_sources` 取最高清晰度 m3u8 | `download_phd3x.py` |
-| 把分片 URL 改写为同源 `/proxy`；pornhd3x 分片剥掉 PNG 包装 | `ph_server.py` |
-| 解析 m3u8、多线程下分片、AES、mux 成 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
+| 打开 freepornvideos.xxx 页、探测 MP4 实际分辨率选最高质量源 | `download_fpv.py`（`resolve_fpv` / `pick_best_source` / `probe_mp4_dimensions`） |
+| 打开 whoreshub.com 页、解析 flashvars、探测 MP4 实际分辨率选最高质量源（支持真 4K） | `download_wh.py`（`resolve_wh` / `extract_flashvars_from_html` / `pick_best_wh_source`） |
+| 打开 hdporn.gg 页、解析 Video.js sources、探测 MP4 实际分辨率选最高质量源（处理 CDN IP 绑定） | `download_hdp.py`（`resolve_hdp` / `extract_sources_from_html` / `pick_best_source`） |
+| 打开 1porn.tv 页、解析 Video.js sources（支持语言前缀）、探测 MP4 实际分辨率选最高质量源（2160p 标签常误导） | `download_1porn.py`（`resolve_1porn_job` / `extract_sources_from_html` / `pick_best_source`） |
+| 打开 fullpornxxx.net 页、AES 解密 session_key、调用 OK.ru API、探测 MP4 实际分辨率选最高质量源（样本最高 720p） | `download_fpx.py`（`resolve_fpx_job` / `decrypt_session_key` / `get_ok_video_sources` / `pick_best_source`） |
+| 把分片 URL 改写为同源 `/proxy`；pornhd3x 分片剥掉 PNG 包装；freepornvideos/whoreshub/hdporn/1porn/fullpornxxx 透传 MP4（支持 Range） | `ph_server.py` |
+| 解析 m3u8、多线程下分片、AES、mux 成 MP4；freepornvideos/whoreshub/hdporn/1porn/fullpornxxx 直接下载 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
 
 API：
 
-- `GET/POST /api/resolve?url=<影片页>` → `{ ok, playlist_url, media_url, segment_count, title, quality, viewkey 或 episode_id, ... }`
-- `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie（Pornhub 另带 Referer）拉 CDN 分片；若正文是 PNG 包装的 MPEG-TS 则剥壳并以 `video/mp2t` 返回
+- `GET/POST /api/resolve?url=<影片页>` → `{ ok, playlist_url | mp4_url, media_url, segment_count, title, quality, viewkey | episode_id | video_id, is_mp4?, actual_resolution?, ... }`
+  - `is_mp4: true` - freepornvideos/whoreshub MP4 直接下载
+  - `actual_resolution` - 实际探测分辨率（如 `3840x2160`，不信标签）
+- `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie（Pornhub 另带 Referer）拉 CDN 分片；若正文是 PNG 包装的 MPEG-TS 则剥壳并以 `video/mp2t` 返回；freepornvideos 支持 Range 请求（流式下载 / 断点续传）
 - `GET /cache/<job>_*.m3u8` → 改写后的播放列表
 
 ## 依赖
@@ -47,11 +64,17 @@ API：
 
 ## 文件
 
-- `ph_server.py` — 静态站 + 按站点分流的取链 API + CDN 代理
+- `ph_server.py` — 静态站 + 按站点分流的取链 API + CDN 代理（支持 Range）
 - `download_ph_1080.py` — Pornhub 最高清晰度取链
 - `download_phd3x.py` — pornhd3x.tv 影片页取链 + PNG 包装剥壳
-- `index.html` — 按 URL 是否含 `m3u8` 分流；Pornhub / pornhd3x 影片页走 `/api/resolve`；MP4 用 API 返回的 `title` 命名
+- `download_fpv.py` — freepornvideos.xxx 视频页取链（探测 MP4 实际分辨率）
+- `download_wh.py` — whoreshub.com 视频页取链（KVS kt_player，支持真 4K）
+- `download_hdp.py` — hdporn.gg 视频页取链（Video.js，处理 CDN IP 绑定）
+- `download_1porn.py` — 1porn.tv 视频页取链（Video.js，支持语言前缀，2160p 标签常误导）
+- `download_fpx.py` — fullpornxxx.net 视频页取链（AES 解密，OK.ru API，样本最高 720p）
+- `index.html` — 按 URL 是否含 `m3u8` 分流；影片页走 `/api/resolve`；MP4 用 API 返回的 `title` 命名
 - `cache/` — 解析得到的原始/改写 m3u8（本地缓存）
+- `test_fpv.py` / `test_wh.py` / `test_hdp.py` / `test_1porn.py` / `test_fpx.py` — 离线回归测试
 
 ## 注意
 
@@ -59,9 +82,13 @@ API：
 - 任务约 1 小时过期；过期后重新点解析即可。
 - 请勿把本改动推送到上游仓库，除非作者要求。
 
-## pornhd3x.tv 影片页
+## pornhd3x.tv / freepornvideos.xxx 影片页
 
-本服务同时支持 `pornhd3x.tv` 及其 `wwwN` 子域的 `/movies/…` 影片页（例如 `https://www9.pornhd3x.tv/movies/……`）。用法与 Pornhub 相同：把影片页 URL 贴进输入框，点「转码为MP4下载」。该站目前常见只有一档 **720P**；分片可能是「小 PNG + MPEG-TS」，代理会剥壳后再给前端合成。Docker / 代理注意事项与下面各节相同，容器里访问外网仍需按原说明传入代理。
+**pornhd3x.tv**: 同时支持 `pornhd3x.tv` 及其 `wwwN` 子域的 `/movies/…` 影片页（例如 `https://www9.pornhd3x.tv/movies/……`）。用法与 Pornhub 相同：把影片页 URL 贴进输入框，点「转码为MP4下载」。该站目前常见只有一档 **720P**；分片可能是「小 PNG + MPEG-TS」，代理会剥壳后再给前端合成。
+
+**freepornvideos.xxx**: 支持 `/videos/数字/` 视频页（例如 `https://www.freepornvideos.xxx/videos/93810393/title/`）。该站使用 Video.js progressive MP4（原生 MP4，非 HLS），**源标签可能误导**（如 2160p 实际为 1920x1080）。服务会探测每个候选源的 MP4 头部（moov/trak/tkhd box，前 512KB）以获取真实分辨率，选择 **实际像素最高** 的源。下载走浏览器直接下载（fetch + blob），服务端透传并保留 Cookie/UA，支持 Range 请求。
+
+Docker / 代理注意事项与下面各节相同，容器里访问外网仍需按原说明传入代理。
 
 ## 已修复：解析成功但全部分片失败
 

@@ -709,17 +709,83 @@
         return s.indexOf('pornhd3x.tv') > -1 && s.indexOf('/movies/') > -1
       },
 
-      isVideoPage(u) {
-        return this.isPornhubPage(u) || this.isPornhd3xPage(u)
+      // freepornvideos.xxx 视频页（/videos/数字/）
+      isFreePornVideosPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host.indexOf('freepornvideos.') > -1) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('freepornvideos.') > -1 && s.indexOf('/videos/') > -1
       },
 
-      // 调用本地 ph_server 取链，再走原有解析下载
+      isWhoresHubPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host.indexOf('whoreshub.com') > -1 && String(u).toLowerCase().indexOf('/videos/') > -1) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('whoreshub.com') > -1 && s.indexOf('/videos/') > -1
+      },
+
+      isHdPornPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host.indexOf('hdporn.gg') > -1 && String(u).toLowerCase().indexOf('/videos/') > -1) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('hdporn.gg') > -1 && s.indexOf('/videos/') > -1
+      },
+
+      is1PornPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host.indexOf('1porn.tv') > -1 && String(u).toLowerCase().indexOf('/videos/') > -1) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('1porn.tv') > -1 && s.indexOf('/videos/') > -1
+      },
+
+      isFullPornxxxPage(u) {
+        if (!u) return false
+        try {
+          const host = new URL(u, location.href).hostname.toLowerCase()
+          if (host.indexOf('fullpornxxx.net') > -1 && String(u).toLowerCase().indexOf('/video/') > -1) return true
+        } catch (e) { /* ignore */ }
+        const s = String(u).toLowerCase()
+        return s.indexOf('fullpornxxx.net') > -1 && s.indexOf('/video/') > -1
+      },
+
+      isVideoPage(u) {
+        return this.isPornhubPage(u) || this.isPornhd3xPage(u) || this.isFreePornVideosPage(u) || this.isWhoresHubPage(u) || this.isHdPornPage(u) || this.is1PornPage(u) || this.isFullPornxxxPage(u)
+      },
+
+      // 调用本地 ph_server 取链，再走原有解析下载或直接 MP4 下载
       resolveVideoPageThen(onlyGetRange) {
         const pageUrl = this.url
         const isPhd = this.isPornhd3xPage(pageUrl)
-        this.tips = isPhd
-          ? '正在从 pornhd3x.tv 解析 m3u8（download_phd3x）…'
-          : '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…'
+        const isFpv = this.isFreePornVideosPage(pageUrl)
+        const isWh = this.isWhoresHubPage(pageUrl)
+        const isHdp = this.isHdPornPage(pageUrl)
+        const is1p = this.is1PornPage(pageUrl)
+        const isFpx = this.isFullPornxxxPage(pageUrl)
+        this.tips = isFpx
+          ? '正在从 fullpornxxx.net 解析最高质量 MP4（download_fpx，OK.ru API，AES 解密）…'
+          : (is1p
+            ? '正在从 1porn.tv 解析最高质量 MP4（download_1porn，Video.js，支持语言前缀）…'
+            : (isHdp
+              ? '正在从 hdporn.gg 解析最高质量 MP4（download_hdp，Video.js）…'
+              : (isWh
+                ? '正在从 whoreshub.com 解析最高质量 MP4（download_wh，KVS kt_player）…'
+                : (isFpv
+                  ? '正在从 freepornvideos.xxx 解析最高质量 MP4（download_fpv）…'
+                  : (isPhd
+                    ? '正在从 pornhd3x.tv 解析 m3u8（download_phd3x）…'
+                    : '正在从 Pornhub 解析最高清晰度 m3u8（download_ph_1080）…')))))
         fetch('/api/resolve?url=' + encodeURIComponent(pageUrl))
           .then((r) => r.json().then((data) => ({ status: r.status, data })))
           .then(({ data }) => {
@@ -729,7 +795,21 @@
               return
             }
             console.log('[resolve] ok', data)
-            // 原视频标题优先；缺省才用 viewkey / episode_id
+
+            // freepornvideos: 直接 MP4 下载
+            if (data.is_mp4) {
+              const rawTitle = (data.title && String(data.title).trim()) || data.video_id || this.title || ''
+              this.title = this.sanitizeFileName(rawTitle)
+              const qlabel = data.actual_resolution || (data.quality ? (data.quality + 'P') : (data.quality_label || '最高质量'))
+              this.tips = '已取到 ' + qlabel + ' MP4' +
+                (this.title ? ('，文件名: ' + this.title) : '') + '，开始下载…'
+              // 直接下载 MP4（通过 /proxy）
+              const mp4Url = new URL(data.mp4_url, location.href).href
+              this.downloadDirectMP4(mp4Url)
+              return
+            }
+
+            // pornhub / phd3x: 原 m3u8 流程
             const rawTitle = (data.title && String(data.title).trim()) || data.viewkey || data.episode_id || this.title || ''
             this.title = this.sanitizeFileName(rawTitle)
             if (this.pendingStreamIsMp4 !== null && this.pendingStreamIsMp4 !== undefined && !this.streamWriter) {
@@ -768,11 +848,11 @@
         }
         // 分流规则：URL 字符串是否含 "m3u8"（忽略大小写）
         // - 含 m3u8 → 直接当播放列表解析下载，绝不调用 /api/resolve
-        // - 不含 m3u8 → 当视频页：Pornhub 或 pornhd3x.tv 影片页，调 /api/resolve
+        // - 不含 m3u8 → 当视频页：Pornhub / pornhd3x.tv / freepornvideos.xxx 影片页，调 /api/resolve
         const urlLower = String(this.url).toLowerCase()
         if (urlLower.indexOf('m3u8') === -1) {
           if (!this.isVideoPage(this.url)) {
-            alert('请输入 m3u8 链接，或 Pornhub / pornhd3x.tv 影片页链接')
+            alert('请输入 m3u8 链接，或 Pornhub / pornhd3x.tv / freepornvideos.xxx 视频页链接')
             return
           }
           if (this.downloading) {
@@ -1084,6 +1164,44 @@
         document.body.appendChild(a)
         a.click()
         a.remove()
+      },
+
+      // freepornvideos: 直接下载 MP4（通过 /proxy 透明代理，保留 Cookie/UA）
+      downloadDirectMP4(mp4Url) {
+        this.tips = '正在下载 MP4，请稍后…'
+        this.downloading = true
+        const fileName = this.resolveDownloadFileName()
+        
+        // 使用 fetch + blob 下载（浏览器自动处理大文件）
+        fetch(mp4Url)
+          .then(response => {
+            if (!response.ok) {
+              throw new Error('下载失败: HTTP ' + response.status)
+            }
+            const contentLength = response.headers.get('Content-Length')
+            if (contentLength) {
+              this.tips = '正在下载 MP4（大小: ' + (parseInt(contentLength) / (1024 * 1024)).toFixed(2) + ' MB）…'
+            }
+            return response.blob()
+          })
+          .then(blob => {
+            this.tips = 'MP4 下载完成，准备保存…'
+            const a = document.createElement('a')
+            a.download = fileName + '.mp4'
+            a.href = URL.createObjectURL(blob)
+            a.style.display = 'none'
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            URL.revokeObjectURL(a.href)
+            this.tips = 'MP4 下载成功！'
+            this.downloading = false
+          })
+          .catch(err => {
+            this.tips = 'm3u8 视频在线提取工具'
+            alert('MP4 下载失败: ' + err)
+            this.downloading = false
+          })
       },
 
       // 格式化时间
