@@ -57,7 +57,8 @@ API：
 
 ## 依赖
 
-- Python 3.10+（标准库即可；取链不强制 Playwright）
+- Python 3.10+
+- `pip install -r requirements.txt`（`requests`、`pycryptodome`；取链不强制 Playwright）
 - 本机浏览器访问 `127.0.0.1:8765`
 
 可选：系统安装 `ffmpeg` 仅在你单独跑 `download_ph_1080.py` CLI 时需要；网页合成走浏览器里的 `mux-mp4.js`。
@@ -124,7 +125,7 @@ docker run --rm -p 8765:8765 m3u8-downloader-ph
 
 换端口：`PH_PORT=9000 docker compose up -d --build`（映射到宿主机 9000）。
 
-说明：镜像只含 Python 标准库桥接服务，**未**安装 Playwright/Chromium；取链走 HTTP。公开暴露前请自行加反向代理鉴权，勿当作开放下载站。
+说明：镜像会安装 `requirements.txt` 中的 `requests` 与 `pycryptodome`，**未**安装 Playwright/Chromium；取链走 HTTP。公开暴露前请自行加反向代理鉴权，勿当作开放下载站。
 
 ### 容器里访问外网：必须显式传入代理
 
