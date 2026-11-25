@@ -62,6 +62,10 @@ from download_wh import (  # noqa: E402
     is_wh_page,
     resolve_wh,
 )
+from download_hdp import (  # noqa: E402
+    is_hdp_page,
+    resolve_hdp,
+)
 
 HOST = os.environ.get("PH_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PH_PORT", "8765"))
@@ -375,6 +379,72 @@ def resolve_fpv_job(page_url: str) -> dict:
     }
 
 
+def resolve_hdp_job(page_url: str) -> dict:
+    """hdporn.gg：直接 MP4 下载（Video.js + KVS get_file），无需 m3u8 改写。"""
+    _purge_old_jobs()
+    got = resolve_hdp(page_url)
+    if not got.get("ok"):
+        return {
+            "ok": False,
+            "error": got.get("error") or "hdporn.gg 解析失败",
+            "notes": got.get("notes") or [],
+            "title": got.get("title"),
+            "video_id": got.get("video_id"),
+            "quality": got.get("quality"),
+        }
+
+    job_id = uuid.uuid4().hex[:12]
+    mp4_url = got["mp4_url"]
+    title = got.get("title")
+    quality = got.get("quality")
+    actual_w = got.get("actual_width") or 0
+    actual_h = got.get("actual_height") or 0
+
+    (CACHE / f"{job_id}_meta.json").write_text(
+        json.dumps(
+            {
+                "site": "hdp",
+                "page_url": got.get("page_url") or page_url,
+                "mp4_url": mp4_url,
+                "video_id": got.get("video_id"),
+                "title": title,
+                "quality": quality,
+                "quality_label": got.get("quality_label"),
+                "actual_width": actual_w,
+                "actual_height": actual_h,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "session": got["session"],
+            "referer": got.get("page_url") or page_url,
+            "site": "hdp",
+            "mp4_url": mp4_url,
+            "created": time.time(),
+            "title": title,
+        }
+
+    # 返回格式：前端检测到 is_mp4=True 时走直接下载流程
+    return {
+        "ok": True,
+        "is_mp4": True,
+        "job_id": job_id,
+        "mp4_url": _proxy_path(mp4_url, job_id),
+        "quality": quality or None,
+        "quality_label": got.get("quality_label"),
+        "actual_resolution": f"{actual_w}x{actual_h}" if actual_w and actual_h else None,
+        "video_id": got.get("video_id"),
+        "title": title,
+        "notes": got.get("notes") or [],
+        "site": "hdp",
+    }
+
+
 def resolve_wh_job(page_url: str) -> dict:
     """whoreshub：直接 MP4 下载（KVS kt_player + flashvars），无需 m3u8 改写。"""
     _purge_old_jobs()
@@ -443,6 +513,8 @@ def resolve_page(page_url: str) -> dict:
     page_url = (page_url or "").strip()
     if not page_url.startswith("http"):
         return {"ok": False, "error": "URL 必须以 http/https 开头"}
+    if is_hdp_page(page_url):
+        return resolve_hdp_job(page_url)
     if is_wh_page(page_url):
         return resolve_wh_job(page_url)
     if is_fpv_page(page_url):
@@ -453,7 +525,7 @@ def resolve_page(page_url: str) -> dict:
         return resolve_ph(page_url)
     return {
         "ok": False,
-        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）、pornhd3x.tv 影片页（/movies/…）、freepornvideos.xxx 视频页（/videos/…）或 whoreshub.com 视频页（/videos/…）",
+        "error": "请输入 Pornhub 视频页（view_video / viewkey / embed）、pornhd3x.tv 影片页（/movies/…）、freepornvideos.xxx 视频页（/videos/…）、whoreshub.com 视频页（/videos/…）或 hdporn.gg 视频页（/videos/…）",
     }
 
 

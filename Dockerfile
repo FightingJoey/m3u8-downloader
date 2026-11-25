@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Static UI + bridge (stdlib only; Playwright optional and not installed)
-COPY ph_server.py download_ph_1080.py download_phd3x.py download_fpv.py download_wh.py ./
+COPY ph_server.py download_ph_1080.py download_phd3x.py download_fpv.py download_wh.py download_hdp.py ./
 COPY index.html index-en.html mitm.html ./
 COPY vue.js mux-mp4.js aes-decryptor.js StreamSaver.js serviceWorker.js m3u8-downloader.user.js ./
 COPY imgs ./imgs
