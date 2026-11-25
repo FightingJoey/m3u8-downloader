@@ -1,0 +1,4 @@
+# Runtime deps for ph_server and site adapters.
+# Playwright is optional (headed Pornhub CLI fallback only) and is not installed here.
+requests
+pycryptodome
