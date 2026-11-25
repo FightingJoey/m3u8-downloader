@@ -802,8 +802,8 @@
               this.title = this.sanitizeFileName(rawTitle)
               const qlabel = data.actual_resolution || (data.quality ? (data.quality + 'P') : (data.quality_label || '最高质量'))
               this.tips = '已取到 ' + qlabel + ' MP4' +
-                (this.title ? ('，文件名: ' + this.title) : '') + '，开始下载…'
-              // 直接下载 MP4（通过 /proxy）
+                (this.title ? ('，文件名: ' + this.title) : '') + '，交给浏览器下载…'
+              // 直接下载 MP4（同源 /proxy，浏览器原生下载栏）
               const mp4Url = new URL(data.mp4_url, location.href).href
               this.downloadDirectMP4(mp4Url)
               return
@@ -1166,42 +1166,24 @@
         a.remove()
       },
 
-      // freepornvideos: 直接下载 MP4（通过 /proxy 透明代理，保留 Cookie/UA）
+      // 渐进式 MP4：交给浏览器原生下载管理器（进度/取消/保存位置）。
+      // 仍走同源 /proxy（dl=1），由服务端带上 Cookie/Referer/UA，不把裸 CDN 链接交给 Chrome。
       downloadDirectMP4(mp4Url) {
-        this.tips = '正在下载 MP4，请稍后…'
-        this.downloading = true
         const fileName = this.resolveDownloadFileName()
-        
-        // 使用 fetch + blob 下载（浏览器自动处理大文件）
-        fetch(mp4Url)
-          .then(response => {
-            if (!response.ok) {
-              throw new Error('下载失败: HTTP ' + response.status)
-            }
-            const contentLength = response.headers.get('Content-Length')
-            if (contentLength) {
-              this.tips = '正在下载 MP4（大小: ' + (parseInt(contentLength) / (1024 * 1024)).toFixed(2) + ' MB）…'
-            }
-            return response.blob()
-          })
-          .then(blob => {
-            this.tips = 'MP4 下载完成，准备保存…'
-            const a = document.createElement('a')
-            a.download = fileName + '.mp4'
-            a.href = URL.createObjectURL(blob)
-            a.style.display = 'none'
-            document.body.appendChild(a)
-            a.click()
-            a.remove()
-            URL.revokeObjectURL(a.href)
-            this.tips = 'MP4 下载成功！'
-            this.downloading = false
-          })
-          .catch(err => {
-            this.tips = 'm3u8 视频在线提取工具'
-            alert('MP4 下载失败: ' + err)
-            this.downloading = false
-          })
+        // 只追加参数，避免 URLSearchParams 重编码 u= 里的 CDN 签名
+        const href = /^https?:\/\//i.test(mp4Url) ? mp4Url : new URL(mp4Url, location.href).href
+        const sep = href.indexOf('?') >= 0 ? '&' : '?'
+        const dlUrl = href + sep + 'dl=1&filename=' + encodeURIComponent(fileName + '.mp4')
+        const a = document.createElement('a')
+        a.href = dlUrl
+        a.download = fileName + '.mp4'
+        a.rel = 'noopener'
+        a.style.display = 'none'
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        this.tips = '已交给浏览器下载，请在下载栏查看进度、取消或更改保存位置'
+        this.downloading = false
       },
 
       // 格式化时间

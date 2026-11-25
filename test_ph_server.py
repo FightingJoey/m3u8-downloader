@@ -4,13 +4,18 @@
 
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
 
 from download_fpv import is_fpv_page
 from download_wh import is_wh_page
 from ph_server import (
+    _content_disposition_attachment,
+    _mp4_download_filename,
     _proxy_host_allowed,
     _proxy_path,
     _redact_url,
+    _safe_download_filename,
+    _stream_mp4_proxy,
     resolve_1porn_job_wrapper,
     resolve_fpx_job_wrapper,
     resolve_page,
@@ -122,6 +127,164 @@ class TestMp4Wrappers(unittest.TestCase):
         path = _proxy_path("https://www.whoreshub.com/get_file/1/x.mp4/?v-acctoken=abc&d=1", "job1")
         self.assertTrue(path.startswith("/proxy?job=job1&u="))
         self.assertNotIn("&v-acctoken=", path)
+
+
+
+class FakeWFile:
+    def __init__(self):
+        self.buf = bytearray()
+
+    def write(self, data):
+        self.buf.extend(data)
+
+
+class FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = []
+        self.wfile = FakeWFile()
+        self.ended = False
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, key, value):
+        self.headers.append((key, value))
+
+    def end_headers(self):
+        self.ended = True
+
+    def header_map(self):
+        return {k.lower(): v for k, v in self.headers}
+
+
+class FakeUrllibResp:
+    def __init__(self, status=200, headers=None, body=b"ftypfake"):
+        self.status = status
+        self.headers = headers or {
+            "Content-Type": "video/mp4",
+            "Content-Length": str(len(body)),
+            "Accept-Ranges": "bytes",
+        }
+        self._body = body
+        self.closed = False
+
+    def getcode(self):
+        return self.status
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            data = self._body
+            self._body = b""
+            return data
+        data, self._body = self._body[:n], self._body[n:]
+        return data
+
+    def close(self):
+        self.closed = True
+
+
+class TestDownloadFilename(unittest.TestCase):
+    def test_strips_paths_and_adds_extension(self):
+        self.assertEqual(_safe_download_filename("../../etc/passwd"), "passwd.mp4")
+        self.assertEqual(_safe_download_filename("cute video"), "cute video.mp4")
+        self.assertEqual(_safe_download_filename(""), "video.mp4")
+        self.assertEqual(_safe_download_filename("film.MP4"), "film.MP4")
+
+    def test_strips_header_injection_and_quotes(self):
+        got = _safe_download_filename('evil\r\nX-Inject: 1"name')
+        self.assertNotIn("\r", got)
+        self.assertNotIn("\n", got)
+        self.assertNotIn('"', got)
+        self.assertTrue(got.endswith(".mp4"))
+
+    def test_content_disposition_has_ascii_and_utf8(self):
+        header = _content_disposition_attachment("中文标题")
+        self.assertTrue(header.startswith("attachment; "))
+        self.assertIn('filename="', header)
+        self.assertIn("filename*=UTF-8''", header)
+        self.assertIn(quote("中文标题.mp4", safe=""), header)
+
+    def test_dl_flag_required(self):
+        job = {"title": "from-job"}
+        self.assertIsNone(_mp4_download_filename("job=abc&u=https://example.com/a.mp4", job))
+        self.assertEqual(
+            _mp4_download_filename("job=abc&u=https://example.com/a.mp4&dl=1", job),
+            "from-job.mp4",
+        )
+
+    def test_filename_query_preferred_and_sanitized(self):
+        job = {"title": "from-job"}
+        query = "dl=1&filename=" + "%2e%2e%2fsecret"
+        self.assertEqual(_mp4_download_filename(query, job), "secret.mp4")
+
+
+class TestStreamMp4Disposition(unittest.TestCase):
+    def _run(self, download_filename=None, range_header=None):
+        body = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 32
+        upstream = FakeUrllibResp(body=body)
+        handler = FakeHandler()
+        job = {"session": object(), "referer": "https://www.whoreshub.com/videos/1/", "site": "wh"}
+        with patch("ph_server._iter_urllib_mp4", return_value=upstream):
+            _stream_mp4_proxy(
+                handler,
+                job,
+                "https://www.whoreshub.com/get_file/1/x.mp4",
+                range_header,
+                download_filename,
+            )
+        return handler, upstream
+
+    def test_attachment_headers_when_downloading(self):
+        handler, upstream = self._run(download_filename="演示 视频")
+        headers = handler.header_map()
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(handler.ended)
+        self.assertEqual(headers.get("content-type"), "video/mp4")
+        self.assertEqual(headers.get("content-length"), str(len(handler.wfile.buf)))
+        self.assertEqual(headers.get("accept-ranges"), "bytes")
+        disp = headers.get("content-disposition") or ""
+        self.assertTrue(disp.startswith("attachment;"))
+        self.assertIn("filename*=UTF-8''", disp)
+        self.assertIn("Content-Disposition", headers.get("access-control-expose-headers", ""))
+        self.assertTrue(upstream.closed)
+
+    def test_no_disposition_without_download_flag(self):
+        handler, _ = self._run(download_filename=None)
+        headers = handler.header_map()
+        self.assertNotIn("content-disposition", headers)
+        self.assertEqual(headers.get("content-length"), str(len(handler.wfile.buf)))
+        self.assertEqual(headers.get("accept-ranges"), "bytes")
+        self.assertNotIn("Content-Disposition", headers.get("access-control-expose-headers", ""))
+
+    def test_range_download_keeps_disposition_and_content_range(self):
+        body = b"0123456789"
+        upstream = FakeUrllibResp(
+            status=206,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Length": "5",
+                "Content-Range": "bytes 0-4/10",
+                "Accept-Ranges": "bytes",
+            },
+            body=body[:5],
+        )
+        handler = FakeHandler()
+        job = {"session": object(), "referer": "https://www.freepornvideos.xxx/videos/1/", "site": "fpv"}
+        with patch("ph_server._iter_urllib_mp4", return_value=upstream):
+            _stream_mp4_proxy(
+                handler,
+                job,
+                "https://www.freepornvideos.xxx/get_file/1/x.mp4",
+                "bytes=0-4",
+                "clip",
+            )
+        headers = handler.header_map()
+        self.assertEqual(handler.status, 206)
+        self.assertEqual(headers.get("content-range"), "bytes 0-4/10")
+        self.assertEqual(headers.get("content-length"), "5")
+        self.assertTrue((headers.get("content-disposition") or "").startswith("attachment;"))
+
 
 
 if __name__ == "__main__":
