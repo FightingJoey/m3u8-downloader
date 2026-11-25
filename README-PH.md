@@ -1,4 +1,4 @@
-# Pornhub / pornhd3x.tv / freepornvideos.xxx 影片页 → m3u8-downloader
+# Pornhub / pornhd3x.tv / freepornvideos.xxx / whoreshub.com 影片页 → m3u8-downloader
 
 在原版 [m3u8-downloader](https://github.com/Momo707577045/m3u8-downloader) 基础上，同时支持两种输入：
 
@@ -7,6 +7,7 @@
    - **Pornhub**（`view_video` / `viewkey` / embed）：`download_ph_1080.py`，优先 `index-v1-a1.m3u8`（2160/1080/720/480…）
    - **pornhd3x.tv**（含 `wwwN.pornhd3x.tv` 的 `/movies/…` 页）：`download_phd3x.py`；该站分片常带一层 PNG 包装，`/proxy` 会剥壳后再交给 `mux-mp4.js`
    - **freepornvideos.xxx**（`/videos/数字/` 页）：`download_fpv.py`；原生 MP4 渐进式下载（Video.js progressive），按实际分辨率选择最高质量源（探测 MP4 元数据，不信标签）
+   - **whoreshub.com**（`/videos/数字/` 页）：`download_wh.py`；KVS kt_player + flashvars 配置，原生 MP4 渐进式下载，支持真 4K（3840x2160），按实际分辨率选择最高质量源（探测 MP4 元数据）
 
 ## 怎么跑
 
@@ -21,6 +22,7 @@ python3 ph_server.py
    - Pornhub 视频页：`https://cn.pornhub.com/view_video.php?viewkey=XXXX`（URL 中无 `m3u8`）
    - pornhd3x.tv 影片页：`https://www9.pornhd3x.tv/movies/……`
    - freepornvideos.xxx 视频页：`https://www.freepornvideos.xxx/videos/93810393/title/`
+   - whoreshub.com 视频页：`https://www.whoreshub.com/videos/730394/title/`
    - 或直接粘贴 `.m3u8` / 含 `m3u8` 的播放列表 URL
 2. 点 **「转码为MP4下载」**（或「原格式下载」）
 3. 影片页模式：等待「已取到 xxxP / 最高清晰度播放列表」或「已取到 xxxx MP4」，分片下载后合成或直接下载；MP4 文件名优先用页面原标题（`og:title` / `movie.name` 等），缺省才用 viewkey / episode_id / video_id
@@ -32,12 +34,15 @@ python3 ph_server.py
 | 打开 Pornhub 页、选最高清晰度 `*index-v1-a1.m3u8` | `download_ph_1080.py`（`http_find_1080` / `resolve_1080_media_playlist`） |
 | 打开 pornhd3x.tv 影片页、调 `get_sources` 取最高清晰度 m3u8 | `download_phd3x.py` |
 | 打开 freepornvideos.xxx 页、探测 MP4 实际分辨率选最高质量源 | `download_fpv.py`（`resolve_fpv` / `pick_best_source` / `probe_mp4_dimensions`） |
-| 把分片 URL 改写为同源 `/proxy`；pornhd3x 分片剥掉 PNG 包装；freepornvideos 透传 MP4（支持 Range） | `ph_server.py` |
-| 解析 m3u8、多线程下分片、AES、mux 成 MP4；freepornvideos 直接下载 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
+| 打开 whoreshub.com 页、解析 flashvars、探测 MP4 实际分辨率选最高质量源（支持真 4K） | `download_wh.py`（`resolve_wh` / `extract_flashvars_from_html` / `pick_best_wh_source`） |
+| 把分片 URL 改写为同源 `/proxy`；pornhd3x 分片剥掉 PNG 包装；freepornvideos/whoreshub 透传 MP4（支持 Range） | `ph_server.py` |
+| 解析 m3u8、多线程下分片、AES、mux 成 MP4；freepornvideos/whoreshub 直接下载 MP4 | 原版 `index.html` + `mux-mp4.js` 等 |
 
 API：
 
 - `GET/POST /api/resolve?url=<影片页>` → `{ ok, playlist_url | mp4_url, media_url, segment_count, title, quality, viewkey | episode_id | video_id, is_mp4?, actual_resolution?, ... }`
+  - `is_mp4: true` - freepornvideos/whoreshub MP4 直接下载
+  - `actual_resolution` - 实际探测分辨率（如 `3840x2160`，不信标签）
 - `GET /proxy?job=…&u=…` → 带浏览器级 UA/Cookie（Pornhub 另带 Referer）拉 CDN 分片；若正文是 PNG 包装的 MPEG-TS 则剥壳并以 `video/mp2t` 返回；freepornvideos 支持 Range 请求（流式下载 / 断点续传）
 - `GET /cache/<job>_*.m3u8` → 改写后的播放列表
 
