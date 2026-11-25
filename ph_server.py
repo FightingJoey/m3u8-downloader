@@ -70,6 +70,10 @@ from download_1porn import (  # noqa: E402
     is_1porn_page,
     resolve_1porn_job,
 )
+from download_fpx import (  # noqa: E402
+    is_fpx_page,
+    resolve_fpx_job,
+)
 
 HOST = os.environ.get("PH_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PH_PORT", "8765"))
@@ -383,6 +387,55 @@ def resolve_fpv_job(page_url: str) -> dict:
     }
 
 
+def resolve_fpx_job_wrapper(page_url: str) -> dict:
+    """fullpornxxx.net：直接 MP4 下载（OK.ru API + AES 解密）"""
+    _purge_old_jobs()
+    got = resolve_fpx_job(page_url)
+    if not got.get("job_id"):
+        return {
+            "ok": False,
+            "error": "fullpornxxx.net 解析失败",
+        }
+    
+    job_id = got["job_id"]
+    mp4_url = got["url"]
+    title = got.get("title")
+    quality_label = got.get("quality_label")
+    quality_note = got.get("quality_note", "")
+    
+    (CACHE / f"{job_id}_meta.json").write_text(
+        json.dumps(
+            {
+                "site": "fpx",
+                "page_url": got.get("page_url") or page_url,
+                "mp4_url": mp4_url,
+                "title": title,
+                "quality_label": quality_label,
+                "quality_note": quality_note,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "session": got["session"],
+            "referer": got.get("page_url"),
+            "site": "fpx",
+        }
+    
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "title": title,
+        "quality": quality_note,
+        "is_mp4_direct": True,
+        "mp4_url": mp4_url,
+    }
+
+
 def resolve_1porn_job_wrapper(page_url: str) -> dict:
     """1porn.tv：直接 MP4 下载（Video.js + KVS get_file），支持语言前缀。"""
     _purge_old_jobs()
@@ -566,6 +619,8 @@ def resolve_page(page_url: str) -> dict:
     page_url = (page_url or "").strip()
     if not page_url.startswith("http"):
         return {"ok": False, "error": "URL 必须以 http/https 开头"}
+    if is_fpx_page(page_url):
+        return resolve_fpx_job_wrapper(page_url)
     if is_1porn_page(page_url):
         return resolve_1porn_job_wrapper(page_url)
     if is_hdp_page(page_url):
