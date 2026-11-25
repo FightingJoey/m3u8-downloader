@@ -339,10 +339,9 @@ def probe_mp4_dimensions(data: bytes, max_scan: int = 4 * 1024 * 1024) -> tuple[
                     w = w_fp >> 16
                     h = h_fp >> 16
                     if w > 0 and h > 0 and w <= 8192 and h <= 8192:
-                        # 仅当在视频轨道或未知轨道时返回（优先视频）
-                        # 若已知非视频轨道（音频），继续查找
-                        if is_video_track or in_video_track:
-                            return w, h
+                        # 标准 trak 里 tkhd 在 hdlr 之前，扫描到 tkhd 时还不知道
+                        # 是否视频轨。音频 tkhd 宽高为 0，正尺寸即可接受。
+                        return w, h
 
             # 递归扫描容器 box
             if typ in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):

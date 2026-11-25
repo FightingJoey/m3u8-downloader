@@ -26,6 +26,7 @@ from download_wh import (
     extract_title,
     extract_video_id,
     is_wh_page,
+    probe_mp4_dimensions,
     resolve_wh,
 )
 
@@ -112,14 +113,19 @@ class TestWhTitleExtraction(unittest.TestCase):
 
 
 class TestWhPlaceholder(unittest.TestCase):
-    """真实网络测试（无网络访问时跳过）。"""
+    """resolve_wh 行为：离线时是网络错误，在线时必须给出实测分辨率。"""
 
-    def test_resolve_wh_no_network(self):
-        """无网络访问时应返回网络错误（非"待实现"）。"""
+    def test_resolve_wh_not_unimplemented(self):
+        """失败不得是“待实现”；成功则必须带回实测宽高。"""
         result = resolve_wh("https://www.whoreshub.com/videos/730394/title/")
-        self.assertFalse(result.get("ok"))
-        # 预期网络错误，不是"待实现"
-        self.assertIn("失败", result.get("error", ""))
+        if not result.get("ok"):
+            err = result.get("error") or ""
+            self.assertNotIn("待实现", err)
+            self.assertTrue(err, "失败时应有错误信息")
+            return
+        self.assertGreater(int(result.get("actual_width") or 0), 0)
+        self.assertGreater(int(result.get("actual_height") or 0), 0)
+        self.assertIn("/get_file/", result.get("mp4_url") or "")
 
 
 class TestWhFlashvarsExtraction(unittest.TestCase):
@@ -196,3 +202,40 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+def _synthetic_mp4(width: int, height: int) -> bytes:
+    """Minimal ftyp+moov with tkhd before mdia/hdlr (real-world box order)."""
+    import struct
+
+    def box(typ: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + typ + payload
+
+    tkhd = bytearray(84)
+    struct.pack_into(">I", tkhd, 76, width << 16)
+    struct.pack_into(">I", tkhd, 80, height << 16)
+    hdlr = b"\x00" * 8 + b"vide" + b"\x00" * 13
+    mdia = box(b"mdia", box(b"hdlr", hdlr))
+    trak = box(b"trak", box(b"tkhd", bytes(tkhd)) + mdia)
+    moov = box(b"moov", trak)
+    ftyp = box(b"ftyp", b"isom" + struct.pack(">I", 0) + b"isomiso2mp41")
+    return ftyp + moov
+
+
+class TestWhProbeDimensions(unittest.TestCase):
+    def test_probe_reads_tkhd_before_hdlr(self):
+        data = _synthetic_mp4(3840, 2160)
+        self.assertEqual(probe_mp4_dimensions(data), (3840, 2160))
+
+    def test_probe_ignores_audio_zero_dimensions(self):
+        data = _synthetic_mp4(0, 0)
+        self.assertIsNone(probe_mp4_dimensions(data))
+
+
+class TestWhNotDispatchedAsFpv(unittest.TestCase):
+    def test_whoreshub_is_not_fpv_page(self):
+        from download_fpv import is_fpv_page
+
+        url = "https://www.whoreshub.com/videos/730394/crazy-cosplaying-hottie-video-with-xander-corvus-mia-stone-brazzers/"
+        self.assertTrue(is_wh_page(url))
+        self.assertFalse(is_fpv_page(url))

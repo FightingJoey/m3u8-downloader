@@ -457,9 +457,18 @@ def _is_failover_status(exc: BaseException) -> bool:
 
 
 def maybe_decompress(data: bytes, content_encoding: str | None = None) -> bytes:
-    """urllib 在部分环境下不会自动解 Content-Encoding，按魔数兜底。"""
+    """urllib 在部分环境下不会自动解 Content-Encoding，按魔数兜底。
+
+    content_encoding may be a header string or an HTTPMessage / mapping
+    (download_hdp previously passed resp.headers by mistake).
+    """
     if not data:
         return data
+    if content_encoding is not None and not isinstance(content_encoding, str):
+        try:
+            content_encoding = content_encoding.get("Content-Encoding")
+        except Exception:
+            content_encoding = None
     enc = (content_encoding or "").lower()
     if data[:2] == bytes([0x1F, 0x8B]) or "gzip" in enc:
         try:

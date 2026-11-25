@@ -217,6 +217,29 @@ class TestFpvResolutionLogic(unittest.TestCase):
         )
 
 
+
+def _synthetic_mp4(width: int, height: int) -> bytes:
+    import struct
+
+    def box(typ: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + typ + payload
+
+    tkhd = bytearray(84)
+    struct.pack_into(">I", tkhd, 76, width << 16)
+    struct.pack_into(">I", tkhd, 80, height << 16)
+    hdlr = b"\x00" * 8 + b"vide" + b"\x00" * 13
+    mdia = box(b"mdia", box(b"hdlr", hdlr))
+    trak = box(b"trak", box(b"tkhd", bytes(tkhd)) + mdia)
+    moov = box(b"moov", trak)
+    ftyp = box(b"ftyp", b"isom" + struct.pack(">I", 0) + b"isomiso2mp41")
+    return ftyp + moov
+
+
+class TestFpvProbeDimensions(unittest.TestCase):
+    def test_probe_reads_tkhd_before_hdlr(self):
+        self.assertEqual(probe_mp4_dimensions(_synthetic_mp4(1920, 1080)), (1920, 1080))
+
+
 def run():
     unittest.main(argv=["test_fpv.py"], exit=False, verbosity=2)
 
