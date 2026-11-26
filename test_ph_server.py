@@ -37,7 +37,13 @@ class TestProxyAllowlist(unittest.TestCase):
             "api.ok.ru",
             "vd750.okcdn.ru",
             "di.phncdn.com",
+            "ev-h.phncdn.com",
+            "hv-h.phncdn.com",
             "www.pornhd3x.tv",
+            "cdn-aws-t11.cdnamz.me",
+            "cdnamz.me",
+            "p16-cc-sg.ibyteimg.com",
+            "ibyteimg.com",
         ):
             self.assertTrue(_proxy_host_allowed(host), host)
 

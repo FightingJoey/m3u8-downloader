@@ -116,6 +116,10 @@ def _proxy_path(abs_url: str, job_id: str) -> str:
 
 # 各站点适配器白名单的并集。/proxy 必须用这一份，不能只用 download_fpv 的名单，
 # 否则 whoreshub.com / hdporn.gg / 1porn.tv / okcdn.ru 的 get_file 或 CDN 会被 SSRF 拦成 403。
+# pornhd3x 的 m3u8 挂在 cdnamz.me（例如 cdn-aws-t11.cdnamz.me），相对分片
+# /pplaylists/<base64> 会 301 到 ibyteimg.com（ImageX）。二者都不在 pornhd3x.tv。
+# PR #3 收紧白名单后若漏掉这些 CDN，所有 pornhd3x 分片会在 /proxy 瞬间 403。
+# Pornhub 分片仍走 phncdn.com，不受该遗漏影响。
 _PROXY_ALLOWED_SUFFIXES = (
     "freepornvideos.xxx",
     "fpvcdn.com",
@@ -129,6 +133,8 @@ _PROXY_ALLOWED_SUFFIXES = (
     "okcdn.ru",
     "phncdn.com",
     "pornhd3x.tv",
+    "cdnamz.me",
+    "ibyteimg.com",
 )
 _MP4_SITES = frozenset({"fpv", "wh", "hdp", "1porn", "fpx"})
 def _redact_url(url: str) -> str:
